@@ -1,73 +1,23 @@
-const express  = require('express');
-const mongoose = require('mongoose');
-const bcrypt   = require('bcryptjs');
-const jwt      = require('jsonwebtoken');
-const cors     = require('cors');
+const express = require('express');
+const bcrypt  = require('bcryptjs');
+const jwt     = require('jsonwebtoken');
+const cors    = require('cors');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.use(cors({
   origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
 }));
 app.options('*', cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
-// ── MONGOOSE CONNECTION (reuse across serverless calls) ──────────
-let isConnected = false;
-async function connectDB() {
-  if (isConnected) return;
-  await mongoose.connect(process.env.MONGODB_URI);
-  isConnected = true;
-}
-
-// ── SCHEMAS ──────────────────────────────────────────────────────
-const AssistantSchema = new mongoose.Schema({
-  name:  { type: String, default: '' },
-  role:  { type: String, default: 'Assistant Coach' },
-  email: { type: String, default: '' },
-  cell:  { type: String, default: '' },
-  bio:   { type: String, default: '' },
-}, { _id: false });
-
-const PlayerSchema = new mongoose.Schema({
-  name:     { type: String, required: true, trim: true },
-  jersey:   { type: String, default: '' },
-  gradYear: { type: String, default: '' },
-  position: { type: String, default: '' },
-  hw:       { type: String, default: '' },
-  city:     { type: String, default: '' },
-  state:    { type: String, default: '' },
-}, { timestamps: true });
-
-const TryoutSchema = new mongoose.Schema({
-  date:     { type: String, required: true },
-  time:     { type: String, required: true },
-  location: { type: String, required: true },
-  fee:      { type: String, required: true },
-}, { timestamps: true });
-
-const CoachSchema = new mongoose.Schema({
-  firstName:   { type: String, required: true, trim: true },
-  lastName:    { type: String, required: true, trim: true },
-  email:       { type: String, required: true, unique: true, trim: true, lowercase: true },
-  phone:       { type: String, required: true, trim: true },
-  password:    { type: String, required: true },
-  teamName:    { type: String, required: true, trim: true },
-  state:       { type: String, default: '', trim: true },
-  location:    { type: String, default: '', trim: true },
-  ageGroup:    { type: String, default: '', trim: true },
-  emailPublic: { type: String, default: '' },
-  phonePublic: { type: String, default: '' },
-  bio:         { type: String, default: '' },
-  image:       { type: String, default: '' },
-  assistant1:  { type: AssistantSchema, default: () => ({}) },
-  assistant2:  { type: AssistantSchema, default: () => ({}) },
-  tryouts:     { type: [TryoutSchema], default: [] },
-  players:     { type: [PlayerSchema], default: [] },
-}, { timestamps: true });
-
-const Coach = mongoose.models.Coach || mongoose.model('Coach', CoachSchema);
+// ── SUPABASE CLIENT ───────────────────────────────────────────────
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
 
 // ── AUTH HELPERS ─────────────────────────────────────────────────
 const signToken = id => jwt.sign({ coachId: id }, process.env.JWT_SECRET, { expiresIn: '7d' });
@@ -84,16 +34,6 @@ function requireAuth(req, res, next) {
   }
 }
 
-// ── DB MIDDLEWARE ─────────────────────────────────────────────────
-app.use(async (req, res, next) => {
-  try {
-    await connectDB();
-    next();
-  } catch (err) {
-    res.status(500).json({ message: 'Database connection failed' });
-  }
-});
-
 // ════════════════════════════════════════════════════════════════
 //  AUTH ROUTES
 // ════════════════════════════════════════════════════════════════
@@ -106,22 +46,31 @@ app.post('/api/coach/register', async (req, res) => {
       return res.status(400).json({ message: 'All fields are required' });
     if (password.length < 8)
       return res.status(400).json({ message: 'Password must be at least 8 characters' });
-    if (await Coach.findOne({ email: email.toLowerCase() }))
-      return res.status(409).json({ message: 'An account with this email already exists' });
+
+    // Check if email exists
+    const { data: existing } = await supabase
+      .from('coaches')
+      .select('id')
+      .eq('email', email.toLowerCase())
+      .single();
+    if (existing) return res.status(409).json({ message: 'An account with this email already exists' });
 
     const hashed = await bcrypt.hash(password, 12);
-    await Coach.create({
-      firstName, lastName,
-      email:       email.toLowerCase(),
-      phone,       teamName,
-      password:    hashed,
-      emailPublic: email.toLowerCase(),
-      phonePublic: phone,
+    const { error } = await supabase.from('coaches').insert({
+      first_name:   firstName,
+      last_name:    lastName,
+      email:        email.toLowerCase(),
+      phone,
+      team_name:    teamName,
+      password:     hashed,
+      email_public: email.toLowerCase(),
+      phone_public: phone,
     });
+    if (error) throw error;
     res.status(201).json({ message: 'Account created successfully' });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ message: err.message || 'Server error' });
   }
 });
 
@@ -131,12 +80,19 @@ app.post('/api/coach/login', async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password)
       return res.status(400).json({ message: 'Email and password are required' });
-    const coach = await Coach.findOne({ email: email.toLowerCase() });
-    if (!coach || !(await bcrypt.compare(password, coach.password)))
+
+    const { data: coach, error } = await supabase
+      .from('coaches')
+      .select('*')
+      .eq('email', email.toLowerCase())
+      .single();
+    if (error || !coach) return res.status(401).json({ message: 'Invalid email or password' });
+    if (!(await bcrypt.compare(password, coach.password)))
       return res.status(401).json({ message: 'Invalid email or password' });
+
     res.json({
-      token: signToken(coach._id),
-      coach: { _id: coach._id, firstName: coach.firstName, lastName: coach.lastName, teamName: coach.teamName }
+      token: signToken(coach.id),
+      coach: { _id: coach.id, firstName: coach.first_name, lastName: coach.last_name, teamName: coach.team_name }
     });
   } catch (err) {
     console.error(err);
@@ -151,9 +107,15 @@ app.post('/api/coach/login', async (req, res) => {
 // GET /api/coach/me
 app.get('/api/coach/me', requireAuth, async (req, res) => {
   try {
-    const coach = await Coach.findById(req.coachId).select('-password');
-    if (!coach) return res.status(404).json({ message: 'Coach not found' });
-    res.json({ coach });
+    const { data: coach, error } = await supabase
+      .from('coaches')
+      .select('id, first_name, last_name, email_public, phone_public, bio, image_url, team_name, state, location, age_group, assistant1, assistant2')
+      .eq('id', req.coachId)
+      .single();
+    if (error || !coach) return res.status(404).json({ message: 'Coach not found' });
+
+    // Normalize for frontend
+    res.json({ coach: normalizeCoach(coach) });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
@@ -162,15 +124,34 @@ app.get('/api/coach/me', requireAuth, async (req, res) => {
 // PUT /api/coach/update-profile
 app.put('/api/coach/update-profile', requireAuth, async (req, res) => {
   try {
-    const allowed = ['firstName','lastName','emailPublic','phonePublic','bio','image','teamName','state','location','ageGroup'];
-    const update  = {};
-    allowed.forEach(k => { if (req.body[k] !== undefined) update[k] = req.body[k]; });
+    const map = {
+      firstName:   'first_name',
+      lastName:    'last_name',
+      emailPublic: 'email_public',
+      phonePublic: 'phone_public',
+      bio:         'bio',
+      imageUrl:    'image_url',
+      teamName:    'team_name',
+      state:       'state',
+      location:    'location',
+      ageGroup:    'age_group',
+    };
+    const update = {};
+    Object.entries(map).forEach(([jsKey, dbKey]) => {
+      if (req.body[jsKey] !== undefined) update[dbKey] = req.body[jsKey];
+    });
     if (update.state) update.state = update.state.toUpperCase();
-    const coach = await Coach.findByIdAndUpdate(req.coachId, update, { new: true }).select('-password');
-    if (!coach) return res.status(404).json({ message: 'Coach not found' });
-    res.json({ message: 'Saved', coach });
+
+    const { data: coach, error } = await supabase
+      .from('coaches')
+      .update(update)
+      .eq('id', req.coachId)
+      .select('id, first_name, last_name, email_public, phone_public, bio, image_url, team_name, state, location, age_group, assistant1, assistant2')
+      .single();
+    if (error) throw error;
+    res.json({ message: 'Saved', coach: normalizeCoach(coach) });
   } catch (err) {
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ message: err.message || 'Server error' });
   }
 });
 
@@ -178,22 +159,32 @@ app.put('/api/coach/update-profile', requireAuth, async (req, res) => {
 app.put('/api/coach/update-assistants', requireAuth, async (req, res) => {
   try {
     const update = {};
-    if (req.body.assistant1) update.assistant1 = req.body.assistant1;
-    if (req.body.assistant2) update.assistant2 = req.body.assistant2;
-    const coach = await Coach.findByIdAndUpdate(req.coachId, update, { new: true }).select('-password');
-    if (!coach) return res.status(404).json({ message: 'Coach not found' });
-    res.json({ message: 'Saved', coach });
+    if (req.body.assistant1 !== undefined) update.assistant1 = req.body.assistant1;
+    if (req.body.assistant2 !== undefined) update.assistant2 = req.body.assistant2;
+
+    const { data: coach, error } = await supabase
+      .from('coaches')
+      .update(update)
+      .eq('id', req.coachId)
+      .select('id, first_name, last_name, email_public, phone_public, bio, image_url, team_name, state, location, age_group, assistant1, assistant2')
+      .single();
+    if (error) throw error;
+    res.json({ message: 'Saved', coach: normalizeCoach(coach) });
   } catch (err) {
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ message: err.message || 'Server error' });
   }
 });
 
 // GET /api/coach/tryouts
 app.get('/api/coach/tryouts', requireAuth, async (req, res) => {
   try {
-    const coach = await Coach.findById(req.coachId).select('tryouts');
-    if (!coach) return res.status(404).json({ message: 'Coach not found' });
-    res.json({ tryouts: coach.tryouts });
+    const { data: tryouts, error } = await supabase
+      .from('tryouts')
+      .select('*')
+      .eq('coach_id', req.coachId)
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+    res.json({ tryouts: tryouts.map(normalizeTryout) });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
@@ -205,30 +196,57 @@ app.post('/api/coach/tryouts', requireAuth, async (req, res) => {
     const { date, time, location, fee } = req.body;
     if (!date || !time || !location || !fee)
       return res.status(400).json({ message: 'date, time, location and fee are all required' });
-    const coach = await Coach.findByIdAndUpdate(
-      req.coachId,
-      { $push: { tryouts: { date, time, location, fee } } },
-      { new: true }
-    ).select('tryouts');
-    if (!coach) return res.status(404).json({ message: 'Coach not found' });
-    res.status(201).json({ message: 'Tryout added', tryouts: coach.tryouts });
+
+    const { data: tryout, error } = await supabase
+      .from('tryouts')
+      .insert({ coach_id: req.coachId, date, time, location, fee })
+      .select()
+      .single();
+    if (error) throw error;
+    res.status(201).json({ message: 'Tryout added', tryout: normalizeTryout(tryout) });
   } catch (err) {
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ message: err.message || 'Server error' });
   }
 });
 
 // DELETE /api/coach/tryouts/:tryoutId
 app.delete('/api/coach/tryouts/:tryoutId', requireAuth, async (req, res) => {
   try {
-    const coach = await Coach.findByIdAndUpdate(
-      req.coachId,
-      { $pull: { tryouts: { _id: req.params.tryoutId } } },
-      { new: true }
-    ).select('tryouts');
-    if (!coach) return res.status(404).json({ message: 'Coach not found' });
-    res.json({ message: 'Deleted', tryouts: coach.tryouts });
+    const { error } = await supabase
+      .from('tryouts')
+      .delete()
+      .eq('id', req.params.tryoutId)
+      .eq('coach_id', req.coachId);
+    if (error) throw error;
+    res.json({ message: 'Deleted' });
   } catch (err) {
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ message: err.message || 'Server error' });
+  }
+});
+
+// ── IMAGE UPLOAD ──────────────────────────────────────────────────
+// POST /api/coach/upload-image
+app.post('/api/coach/upload-image', requireAuth, async (req, res) => {
+  try {
+    const { base64, fileName, mimeType } = req.body;
+    if (!base64 || !fileName) return res.status(400).json({ message: 'base64 and fileName required' });
+
+    const buffer    = Buffer.from(base64, 'base64');
+    const filePath  = `coaches/${req.coachId}/${Date.now()}-${fileName}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from('images')
+      .upload(filePath, buffer, { contentType: mimeType || 'image/jpeg', upsert: true });
+    if (uploadError) throw uploadError;
+
+    const { data: { publicUrl } } = supabase.storage.from('images').getPublicUrl(filePath);
+
+    // Save URL to coach record
+    await supabase.from('coaches').update({ image_url: publicUrl }).eq('id', req.coachId);
+
+    res.json({ message: 'Uploaded', imageUrl: publicUrl });
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'Upload failed' });
   }
 });
 
@@ -239,8 +257,18 @@ app.delete('/api/coach/tryouts/:tryoutId', requireAuth, async (req, res) => {
 // GET /api/teams
 app.get('/api/teams', async (req, res) => {
   try {
-    const teams = await Coach.find({}, 'firstName lastName teamName state location ageGroup').lean();
-    res.json({ teams });
+    const { data: teams, error } = await supabase
+      .from('coaches')
+      .select('id, first_name, last_name, team_name, state, location, age_group, image_url');
+    if (error) throw error;
+    res.json({ teams: teams.map(t => ({
+      _id:      t.id,
+      teamName: t.team_name,
+      state:    t.state,
+      location: t.location,
+      ageGroup: t.age_group,
+      imageUrl: t.image_url,
+    }))});
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
@@ -249,9 +277,13 @@ app.get('/api/teams', async (req, res) => {
 // GET /api/teams/:id
 app.get('/api/teams/:id', async (req, res) => {
   try {
-    const team = await Coach.findById(req.params.id).select('-password -email -phone').lean();
-    if (!team) return res.status(404).json({ message: 'Team not found' });
-    res.json({ team });
+    const { data: team, error } = await supabase
+      .from('coaches')
+      .select('id, first_name, last_name, email_public, phone_public, bio, image_url, team_name, state, location, age_group, assistant1, assistant2')
+      .eq('id', req.params.id)
+      .single();
+    if (error || !team) return res.status(404).json({ message: 'Team not found' });
+    res.json({ team: normalizeCoach(team) });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
@@ -260,41 +292,88 @@ app.get('/api/teams/:id', async (req, res) => {
 // GET /api/teams/:id/tryouts
 app.get('/api/teams/:id/tryouts', async (req, res) => {
   try {
-    const team = await Coach.findById(req.params.id).select('tryouts').lean();
-    if (!team) return res.status(404).json({ message: 'Team not found' });
-    res.json({ tryouts: team.tryouts });
+    const { data: tryouts, error } = await supabase
+      .from('tryouts')
+      .select('*')
+      .eq('coach_id', req.params.id)
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+    res.json({ tryouts: tryouts.map(normalizeTryout) });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// POST /api/teams/:id/roster  — player registers to a team
+// POST /api/teams/:id/roster
 app.post('/api/teams/:id/roster', async (req, res) => {
   try {
     const { name, jersey, gradYear, position, hw, city, state } = req.body;
     if (!name) return res.status(400).json({ message: 'Player name is required' });
-    const team = await Coach.findByIdAndUpdate(
-      req.params.id,
-      { $push: { players: { name, jersey, gradYear, position, hw, city, state } } },
-      { new: true }
-    ).select('players');
-    if (!team) return res.status(404).json({ message: 'Team not found' });
-    res.status(201).json({ message: 'Player registered', players: team.players });
+
+    const { data: player, error } = await supabase
+      .from('players')
+      .insert({ coach_id: req.params.id, name, jersey, grad_year: gradYear, position, hw, city, state })
+      .select()
+      .single();
+    if (error) throw error;
+    res.status(201).json({ message: 'Player registered', player: normalizePlayer(player) });
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'Server error' });
+  }
+});
+
+// GET /api/teams/:id/roster
+app.get('/api/teams/:id/roster', async (req, res) => {
+  try {
+    const { data: players, error } = await supabase
+      .from('players')
+      .select('*')
+      .eq('coach_id', req.params.id)
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+    res.json({ players: players.map(normalizePlayer) });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// GET /api/teams/:id/roster  — get all players for a team
-app.get('/api/teams/:id/roster', async (req, res) => {
-  try {
-    const team = await Coach.findById(req.params.id).select('players').lean();
-    if (!team) return res.status(404).json({ message: 'Team not found' });
-    res.json({ players: team.players });
-  } catch (err) {
-    res.status(500).json({ message: 'Server error' });
-  }
-});
+// ════════════════════════════════════════════════════════════════
+//  NORMALIZERS — convert snake_case DB fields to camelCase
+// ════════════════════════════════════════════════════════════════
+function normalizeCoach(c) {
+  return {
+    _id:         c.id,
+    firstName:   c.first_name,
+    lastName:    c.last_name,
+    emailPublic: c.email_public  || '',
+    phonePublic: c.phone_public  || '',
+    bio:         c.bio           || '',
+    image:       c.image_url     || '',
+    teamName:    c.team_name,
+    state:       c.state         || '',
+    location:    c.location      || '',
+    ageGroup:    c.age_group     || '',
+    assistant1:  c.assistant1    || {},
+    assistant2:  c.assistant2    || {},
+  };
+}
+
+function normalizeTryout(t) {
+  return { _id: t.id, date: t.date, time: t.time, location: t.location, fee: t.fee };
+}
+
+function normalizePlayer(p) {
+  return {
+    _id:      p.id,
+    name:     p.name,
+    jersey:   p.jersey   || '',
+    gradYear: p.grad_year|| '',
+    position: p.position || '',
+    hw:       p.hw       || '',
+    city:     p.city     || '',
+    state:    p.state    || '',
+  };
+}
 
 module.exports = app;
 module.exports.default = app;
