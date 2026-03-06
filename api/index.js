@@ -381,5 +381,41 @@ function normalizePlayer(p) {
   };
 }
 
+
+// PUT /api/teams/:id/roster/:playerId — edit a player
+app.put('/api/teams/:id/roster/:playerId', requireAuth, async (req, res) => {
+  try {
+    const { name, jersey, gradYear, position, hw, city, state } = req.body;
+    if (!name) return res.status(400).json({ message: 'Player name is required' });
+
+    const { data: player, error } = await supabase
+      .from('players')
+      .update({ name, jersey, grad_year: gradYear, position, hw, city, state })
+      .eq('id', req.params.playerId)
+      .eq('coach_id', req.params.id)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ message: 'Player updated', player: normalizePlayer(player) });
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'Server error' });
+  }
+});
+
+// DELETE /api/teams/:id/roster/:playerId — delete a player
+app.delete('/api/teams/:id/roster/:playerId', requireAuth, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('players')
+      .delete()
+      .eq('id', req.params.playerId)
+      .eq('coach_id', req.params.id);
+    if (error) throw error;
+    res.json({ message: 'Player deleted' });
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'Server error' });
+  }
+});
+
 module.exports = app;
 module.exports.default = app;
