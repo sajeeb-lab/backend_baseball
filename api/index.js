@@ -467,6 +467,26 @@ app.post('/api/coach/schedule', requireAuth, async (req, res) => {
   }
 });
 
+
+// PUT /api/coach/schedule/:gameId — edit a game
+app.put('/api/coach/schedule/:gameId', requireAuth, async (req, res) => {
+  try {
+    const { date, event, city, state } = req.body;
+    if (!date || !event) return res.status(400).json({ message: 'Date and event are required' });
+    const { data, error } = await supabase
+      .from('schedule')
+      .update({ date, event, city: city||'', state: state||'', date_sort: date })
+      .eq('id', req.params.gameId)
+      .eq('coach_id', req.coachId)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ message: 'Game updated', game: normalizeGame(data) });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // DELETE /api/coach/schedule/:gameId — delete a game
 app.delete('/api/coach/schedule/:gameId', requireAuth, async (req, res) => {
   try {
