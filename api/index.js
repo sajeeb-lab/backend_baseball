@@ -441,7 +441,7 @@ app.get('/api/coach/schedule', requireAuth, async (req, res) => {
     const { data, error } = await supabase
       .from('schedule')
       .select('*')
-      .eq('coach_id', req.user.id)
+      .eq('coach_id', req.coachId)
       .order('date_sort', { ascending: true });
     if (error) throw error;
     res.json({ schedule: (data || []).map(normalizeGame) });
@@ -457,7 +457,7 @@ app.post('/api/coach/schedule', requireAuth, async (req, res) => {
     if (!date || !event) return res.status(400).json({ message: 'Date and event are required' });
     const { data, error } = await supabase
       .from('schedule')
-      .insert([{ coach_id: req.user.id, date, event, city: city||'', state: state||'', date_sort: date }])
+      .insert([{ coach_id: req.coachId, date, event, city: city||'', state: state||'', date_sort: date }])
       .select()
       .single();
     if (error) throw error;
@@ -474,7 +474,7 @@ app.delete('/api/coach/schedule/:gameId', requireAuth, async (req, res) => {
       .from('schedule')
       .delete()
       .eq('id', req.params.gameId)
-      .eq('coach_id', req.user.id);
+      .eq('coach_id', req.coachId);
     if (error) throw error;
     res.json({ message: 'Game deleted' });
   } catch (err) {
