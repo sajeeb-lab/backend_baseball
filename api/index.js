@@ -226,13 +226,17 @@ app.delete('/api/coach/tryouts/:tryoutId', requireAuth, async (req, res) => {
 
 // ── IMAGE UPLOAD ──────────────────────────────────────────────────
 // POST /api/coach/upload-image
+// Pass saveToProfile: true only for head coach photo
 app.post('/api/coach/upload-image', requireAuth, async (req, res) => {
   try {
-    const { base64, fileName, mimeType } = req.body;
+    const { base64, fileName, mimeType, saveToProfile } = req.body;
     if (!base64 || !fileName) return res.status(400).json({ message: 'base64 and fileName required' });
 
-    const buffer    = Buffer.from(base64, 'base64');
-    const filePath  = `coaches/${req.coachId}/${Date.now()}-${fileName}`;
+    const buffer   = Buffer.from(base64, 'base64');
+    const ext      = fileName.split('.').pop().toLowerCase() || 'jpg';
+    // Use fixed filename based on slot so re-uploads overwrite the old file
+    const slot     = req.body.slot || 'head'; // 'head' | 'asst1' | 'asst2'
+    const filePath = `coaches/${req.coachId}/${slot}.${ext}`;
 
     const { error: uploadError } = await supabase.storage
       .from('images')
@@ -241,8 +245,10 @@ app.post('/api/coach/upload-image', requireAuth, async (req, res) => {
 
     const { data: { publicUrl } } = supabase.storage.from('images').getPublicUrl(filePath);
 
-    // Save URL to coach record
-    await supabase.from('coaches').update({ image_url: publicUrl }).eq('id', req.coachId);
+    // Only save to coaches table if this is the head coach profile photo
+    if (saveToProfile) {
+      await supabase.from('coaches').update({ image_url: publicUrl }).eq('id', req.coachId);
+    }
 
     res.json({ message: 'Uploaded', imageUrl: publicUrl });
   } catch (err) {
