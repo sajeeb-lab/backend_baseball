@@ -30,6 +30,16 @@ const AssistantSchema = new mongoose.Schema({
   bio:   { type: String, default: '' },
 }, { _id: false });
 
+const PlayerSchema = new mongoose.Schema({
+  name:     { type: String, required: true, trim: true },
+  jersey:   { type: String, default: '' },
+  gradYear: { type: String, default: '' },
+  position: { type: String, default: '' },
+  hw:       { type: String, default: '' },
+  city:     { type: String, default: '' },
+  state:    { type: String, default: '' },
+}, { timestamps: true });
+
 const TryoutSchema = new mongoose.Schema({
   date:     { type: String, required: true },
   time:     { type: String, required: true },
@@ -54,6 +64,7 @@ const CoachSchema = new mongoose.Schema({
   assistant1:  { type: AssistantSchema, default: () => ({}) },
   assistant2:  { type: AssistantSchema, default: () => ({}) },
   tryouts:     { type: [TryoutSchema], default: [] },
+  players:     { type: [PlayerSchema], default: [] },
 }, { timestamps: true });
 
 const Coach = mongoose.models.Coach || mongoose.model('Coach', CoachSchema);
@@ -252,6 +263,34 @@ app.get('/api/teams/:id/tryouts', async (req, res) => {
     const team = await Coach.findById(req.params.id).select('tryouts').lean();
     if (!team) return res.status(404).json({ message: 'Team not found' });
     res.json({ tryouts: team.tryouts });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// POST /api/teams/:id/roster  — player registers to a team
+app.post('/api/teams/:id/roster', async (req, res) => {
+  try {
+    const { name, jersey, gradYear, position, hw, city, state } = req.body;
+    if (!name) return res.status(400).json({ message: 'Player name is required' });
+    const team = await Coach.findByIdAndUpdate(
+      req.params.id,
+      { $push: { players: { name, jersey, gradYear, position, hw, city, state } } },
+      { new: true }
+    ).select('players');
+    if (!team) return res.status(404).json({ message: 'Team not found' });
+    res.status(201).json({ message: 'Player registered', players: team.players });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// GET /api/teams/:id/roster  — get all players for a team
+app.get('/api/teams/:id/roster', async (req, res) => {
+  try {
+    const team = await Coach.findById(req.params.id).select('players').lean();
+    if (!team) return res.status(404).json({ message: 'Team not found' });
+    res.json({ players: team.players });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
