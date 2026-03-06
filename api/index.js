@@ -453,11 +453,11 @@ app.get('/api/coach/schedule', requireAuth, async (req, res) => {
 // POST /api/coach/schedule — add a game
 app.post('/api/coach/schedule', requireAuth, async (req, res) => {
   try {
-    const { date, event, city, state, result } = req.body;
+    const { date, event, city, state } = req.body;
     if (!date || !event) return res.status(400).json({ message: 'Date and event are required' });
     const { data, error } = await supabase
       .from('schedule')
-      .insert([{ coach_id: req.user.id, date, event, city: city||'', state: state||'', result: result||'', date_sort: date }])
+      .insert([{ coach_id: req.user.id, date, event, city: city||'', state: state||'', date_sort: date }])
       .select()
       .single();
     if (error) throw error;
@@ -489,7 +489,6 @@ function normalizeGame(g) {
     event:  g.event  || '',
     city:   g.city   || '',
     state:  g.state  || '',
-    result: g.result || '',
   };
 }
 
