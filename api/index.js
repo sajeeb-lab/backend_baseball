@@ -5,7 +5,12 @@ const jwt      = require('jsonwebtoken');
 const cors     = require('cors');
 
 const app = express();
-app.use(cors({ origin: '*' }));
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
+app.options('*', cors());
 app.use(express.json());
 
 // ── MONGOOSE CONNECTION (reuse across serverless calls) ──────────
@@ -253,3 +258,4 @@ app.get('/api/teams/:id/tryouts', async (req, res) => {
 });
 
 module.exports = app;
+module.exports.default = app;
