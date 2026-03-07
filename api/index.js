@@ -235,19 +235,18 @@ app.post('/api/coach/upload-image', requireAuth, async (req, res) => {
     const buffer   = Buffer.from(base64, 'base64');
     const slot     = req.body.slot || 'head'; // 'head' | 'asst1' | 'asst2'
     // Get the real extension from mimeType to avoid corrupting images
-    // jpeg and jpg are the same format — always normalize to jpg
+    // Delete all existing files for this slot first (clean slate)
+    const allExts = ['jpg','jpeg','png','webp','gif'];
+    await supabase.storage.from('images').remove(allExts.map(e => `coaches/${req.coachId}/${slot}.${e}`));
+
+    // Use original extension from mime type
     const mimeToExt = { 'image/jpeg':'jpg', 'image/jpg':'jpg', 'image/png':'png', 'image/webp':'webp', 'image/gif':'gif' };
     const ext       = mimeToExt[mimeType] || 'jpg';
     const filePath  = `coaches/${req.coachId}/${slot}.${ext}`;
 
-    // Delete ALL possible extensions for this slot including jpeg alias
-    const allExts = ['jpg','jpeg','png','webp','gif'];
-    const toDelete = allExts.map(e => `coaches/${req.coachId}/${slot}.${e}`);
-    await supabase.storage.from('images').remove(toDelete);
-
     const { error: uploadError } = await supabase.storage
       .from('images')
-      .upload(filePath, buffer, { contentType: mimeType || 'image/jpeg', upsert: true });
+      .upload(filePath, buffer, { contentType: mimeType || 'image/jpeg', upsert: false });
     if (uploadError) throw uploadError;
 
     const { data: { publicUrl } } = supabase.storage.from('images').getPublicUrl(filePath);
@@ -260,6 +259,35 @@ app.post('/api/coach/upload-image', requireAuth, async (req, res) => {
     res.json({ message: 'Uploaded', imageUrl: publicUrl });
   } catch (err) {
     res.status(500).json({ message: err.message || 'Upload failed' });
+  }
+});
+
+// DELETE /api/coach/delete-image
+app.delete('/api/coach/delete-image', requireAuth, async (req, res) => {
+  try {
+    const { slot } = req.body; // 'head' | 'asst1' | 'asst2'
+    if (!slot) return res.status(400).json({ message: 'slot required' });
+
+    // Remove all possible extensions for this slot
+    const allExts = ['jpg','jpeg','png','webp','gif'];
+    const paths = allExts.map(e => `coaches/${req.coachId}/${slot}.${e}`);
+    await supabase.storage.from('images').remove(paths);
+
+    // Clear from DB
+    if (slot === 'head') {
+      await supabase.from('coaches').update({ image_url: null }).eq('id', req.coachId);
+    } else {
+      // Clear image from assistant jsonb
+      const col = slot === 'asst1' ? 'assistant1' : 'assistant2';
+      const { data: coach } = await supabase.from('coaches').select(col).eq('id', req.coachId).single();
+      if (coach && coach[col]) {
+        const updated = { ...coach[col], image: '' };
+        await supabase.from('coaches').update({ [col]: updated }).eq('id', req.coachId);
+      }
+    }
+    res.json({ message: 'Deleted' });
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'Delete failed' });
   }
 });
 
