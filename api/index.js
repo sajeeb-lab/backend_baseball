@@ -251,12 +251,15 @@ app.post('/api/coach/upload-image', requireAuth, async (req, res) => {
 
     const { data: { publicUrl } } = supabase.storage.from('images').getPublicUrl(filePath);
 
+    // Append cache-busting timestamp so CDN always serves the fresh image
+    const cacheBustedUrl = `${publicUrl}?t=${Date.now()}`;
+
     // Only save to coaches table if this is the head coach profile photo
     if (saveToProfile) {
-      await supabase.from('coaches').update({ image_url: publicUrl }).eq('id', req.coachId);
+      await supabase.from('coaches').update({ image_url: cacheBustedUrl }).eq('id', req.coachId);
     }
 
-    res.json({ message: 'Uploaded', imageUrl: publicUrl });
+    res.json({ message: 'Uploaded', imageUrl: cacheBustedUrl });
   } catch (err) {
     res.status(500).json({ message: err.message || 'Upload failed' });
   }
