@@ -295,6 +295,48 @@ app.get('/api/teams/:id', async (req, res) => {
   }
 });
 
+
+// POST /api/teams/:id/tryout-registrations — public, saves tryout registration
+app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
+  try {
+    const { completedBy, name, address, city, state, zip, cell, email,
+            playerName, age, dob, hw, pos1, pos2, tryoutDate } = req.body;
+    if (!name || !playerName) return res.status(400).json({ message: 'Name and player name are required' });
+    const { data, error } = await supabase
+      .from('tryout_registrations')
+      .insert([{
+        coach_id: req.params.id,
+        completed_by: completedBy||'',
+        name, address: address||'', city: city||'', state: state||'', zip: zip||'',
+        cell: cell||'', email: email||'',
+        player_name: playerName, age: age||'', dob: dob||'', hw: hw||'',
+        pos1: pos1||'', pos2: pos2||'',
+        tryout_date: tryoutDate||''
+      }])
+      .select()
+      .single();
+    if (error) throw error;
+    res.status(201).json({ message: 'Registration submitted', registration: data });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET /api/coach/tryout-registrations — protected, coach sees their registrations
+app.get('/api/coach/tryout-registrations', requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('tryout_registrations')
+      .select('*')
+      .eq('coach_id', req.coachId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ registrations: data });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // GET /api/teams/:id/tryouts
 app.get('/api/teams/:id/tryouts', async (req, res) => {
   try {
