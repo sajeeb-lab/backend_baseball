@@ -233,10 +233,16 @@ app.post('/api/coach/upload-image', requireAuth, async (req, res) => {
     if (!base64 || !fileName) return res.status(400).json({ message: 'base64 and fileName required' });
 
     const buffer   = Buffer.from(base64, 'base64');
-    const ext      = fileName.split('.').pop().toLowerCase() || 'jpg';
-    // Use fixed filename based on slot so re-uploads overwrite the old file
     const slot     = req.body.slot || 'head'; // 'head' | 'asst1' | 'asst2'
-    const filePath = `coaches/${req.coachId}/${slot}.${ext}`;
+    // Get the real extension from mimeType to avoid corrupting images
+    const mimeToExt = { 'image/jpeg':'jpg', 'image/jpg':'jpg', 'image/png':'png', 'image/webp':'webp', 'image/gif':'gif' };
+    const ext       = mimeToExt[mimeType] || 'jpg';
+    const filePath  = `coaches/${req.coachId}/${slot}.${ext}`;
+
+    // Delete all other extensions for this slot first so no duplicates remain
+    const allExts = ['jpg','jpeg','png','webp','gif'];
+    const toDelete = allExts.filter(e => e !== ext).map(e => `coaches/${req.coachId}/${slot}.${e}`);
+    await supabase.storage.from('images').remove(toDelete);
 
     const { error: uploadError } = await supabase.storage
       .from('images')
