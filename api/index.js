@@ -294,6 +294,138 @@ app.delete('/api/coach/delete-image', requireAuth, async (req, res) => {
   }
 });
 
+
+// ════════════════════════════════════════════════════════════════
+//  ADMIN ROUTES
+// ════════════════════════════════════════════════════════════════
+
+function requireAdmin(req, res, next) {
+  const auth = req.headers.authorization;
+  if (!auth?.startsWith('Bearer ')) return res.status(401).json({ message: 'No token' });
+  try {
+    const payload = jwt.verify(auth.split(' ')[1], process.env.JWT_SECRET);
+    if (payload.role !== 'admin') return res.status(403).json({ message: 'Forbidden' });
+    next();
+  } catch {
+    res.status(401).json({ message: 'Invalid token' });
+  }
+}
+
+// POST /api/admin/login
+app.post('/api/admin/login', (req, res) => {
+  const { username, password } = req.body;
+  const adminUser = process.env.ADMIN_USERNAME || 'admin';
+  const adminPass = process.env.ADMIN_PASSWORD || 'admin123';
+  if (username !== adminUser || password !== adminPass) {
+    return res.status(401).json({ message: 'Invalid credentials' });
+  }
+  const token = jwt.sign({ role: 'admin' }, process.env.JWT_SECRET, { expiresIn: '8h' });
+  res.json({ token });
+});
+
+// GET /api/admin/coaches — all coaches with stats
+app.get('/api/admin/coaches', requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('coaches')
+      .select('id, first_name, last_name, email, phone, team_name, state, location, age_group, image_url, active, created_at')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+
+    // Get tryout registration counts per coach
+    const { data: regCounts } = await supabase
+      .from('tryout_registrations')
+      .select('coach_id');
+
+    const countMap = {};
+    (regCounts || []).forEach(r => { countMap[r.coach_id] = (countMap[r.coach_id] || 0) + 1; });
+
+    const coaches = data.map(c => ({
+      id: c.id,
+      firstName: c.first_name,
+      lastName: c.last_name,
+      email: c.email,
+      phone: c.phone,
+      teamName: c.team_name,
+      state: c.state,
+      location: c.location,
+      ageGroup: c.age_group,
+      image: c.image_url || '',
+      active: c.active !== false, // default true if null
+      createdAt: c.created_at,
+      registrationCount: countMap[c.id] || 0,
+    }));
+    res.json({ coaches });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET /api/admin/coaches/:id — full coach detail
+app.get('/api/admin/coaches/:id', requireAdmin, async (req, res) => {
+  try {
+    const { data: c, error } = await supabase
+      .from('coaches')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+    if (error) throw error;
+
+    const { data: tryouts } = await supabase.from('tryouts').select('*').eq('coach_id', c.id);
+    const { data: regs }    = await supabase.from('tryout_registrations').select('*').eq('coach_id', c.id).order('created_at', { ascending: false });
+    const { data: roster }  = await supabase.from('players').select('*').eq('coach_id', c.id);
+    const { data: schedule } = await supabase.from('schedule').select('*').eq('coach_id', c.id).order('date_sort');
+
+    res.json({
+      coach: {
+        id: c.id, firstName: c.first_name, lastName: c.last_name,
+        email: c.email, phone: c.phone, teamName: c.team_name,
+        state: c.state, location: c.location, ageGroup: c.age_group,
+        image: c.image_url || '', bio: c.bio || '',
+        emailPublic: c.email_public || '', phonePublic: c.phone_public || '',
+        assistant1: c.assistant1 || {}, assistant2: c.assistant2 || {},
+        active: c.active !== false, createdAt: c.created_at,
+      },
+      tryouts: tryouts || [],
+      registrations: regs || [],
+      roster: roster || [],
+      schedule: schedule || [],
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// PUT /api/admin/coaches/:id/toggle-active
+app.put('/api/admin/coaches/:id/toggle-active', requireAdmin, async (req, res) => {
+  try {
+    const { active } = req.body;
+    const { error } = await supabase
+      .from('coaches')
+      .update({ active })
+      .eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ message: active ? 'Coach activated' : 'Coach deactivated', active });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// PUT /api/admin/coaches/:id/edit
+app.put('/api/admin/coaches/:id/edit', requireAdmin, async (req, res) => {
+  try {
+    const { firstName, lastName, email, phone, teamName, state, location, ageGroup } = req.body;
+    const { error } = await supabase.from('coaches').update({
+      first_name: firstName, last_name: lastName, email,
+      phone, team_name: teamName, state, location, age_group: ageGroup,
+    }).eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ message: 'Coach updated' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // ════════════════════════════════════════════════════════════════
 //  PUBLIC ROUTES (index.html + team.html)
 // ════════════════════════════════════════════════════════════════
@@ -303,7 +435,8 @@ app.get('/api/teams', async (req, res) => {
   try {
     const { data: teams, error } = await supabase
       .from('coaches')
-      .select('id, first_name, last_name, team_name, state, location, age_group, image_url');
+      .select('id, first_name, last_name, team_name, state, location, age_group, image_url, active')
+      .or('active.is.null,active.eq.true');
     if (error) throw error;
     res.json({ teams: teams.map(t => ({
       _id:      t.id,
