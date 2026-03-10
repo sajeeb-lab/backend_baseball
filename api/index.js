@@ -2,6 +2,7 @@ const express = require('express');
 const bcrypt  = require('bcryptjs');
 const jwt     = require('jsonwebtoken');
 const cors    = require('cors');
+const axios   = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
@@ -69,22 +70,14 @@ async function upsertGHLContact({ completedBy, name, address, city, state, zip, 
       ],
     };
 
-    const response = await fetch('https://services.leadconnectorhq.com/contacts/upsert', {
-      method: 'POST',
+    const response = await axios.post('https://services.leadconnectorhq.com/contacts/upsert', payload, {
       headers: {
         'Authorization': `Bearer ${GHL_API_KEY}`,
         'Content-Type':  'application/json',
         'Version':       '2021-07-28',
       },
-      body: JSON.stringify(payload),
     });
-
-    if (!response.ok) {
-      const err = await response.text();
-      console.error('GHL upsert failed:', err);
-    } else {
-      console.log('GHL contact upserted successfully');
-    }
+    console.log('GHL contact upserted successfully', response.data?.contact?.id || '');
   } catch (err) {
     // Never block registration if GHL fails
     console.error('GHL upsert error:', err.message);
