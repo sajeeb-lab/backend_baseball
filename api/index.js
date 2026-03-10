@@ -137,6 +137,48 @@ async function upsertGHLPlayer({ name, email, cell, city, state, position, jerse
   }
 }
 
+// ── GHL COACH HELPER ──────────────────────────────────────────────
+async function upsertGHLCoach({ firstName, lastName, email, phone, teamName, state, city, ageGroup, bio }) {
+  const GHL_API_KEY     = process.env.GHL_API_KEY;
+  const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID;
+  if (!GHL_API_KEY || !GHL_LOCATION_ID) {
+    console.error('GHL ERROR: env vars missing');
+    return;
+  }
+
+  const payload = {
+    locationId: GHL_LOCATION_ID,
+    firstName:  firstName || '',
+    lastName:   lastName  || '',
+    email:      email     || '',
+    phone:      phone     || '',
+    city:       city      || '',
+    state:      state     || '',
+    tags:       ['Head Coach Name'],
+    customFields: [
+      { key: 'team_name',  value: teamName  || '' },
+      { key: 'age_group',  value: ageGroup  || '' },
+      { key: 'bio',        value: bio       || '' },
+    ],
+  };
+
+  console.log('GHL Coach payload:', JSON.stringify(payload, null, 2));
+
+  try {
+    const response = await axios.post('https://services.leadconnectorhq.com/contacts/upsert', payload, {
+      headers: {
+        'Authorization': `Bearer ${GHL_API_KEY}`,
+        'Content-Type':  'application/json',
+        'Version':       '2021-07-28',
+      },
+    });
+    console.log('GHL coach contact upserted. ID:', response.data?.contact?.id || 'unknown');
+  } catch (err) {
+    const errMsg = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    console.error('GHL coach upsert error:', errMsg);
+  }
+}
+
 // ── AUTH HELPERS ─────────────────────────────────────────────────
 const signToken = id => jwt.sign({ coachId: id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
@@ -204,6 +246,10 @@ app.post('/api/coach/register', async (req, res) => {
       phone_public: phone,
     });
     if (error) throw error;
+
+    // Upsert GHL contact on registration
+    upsertGHLCoach({ firstName, lastName, email, phone, teamName });
+
     res.status(201).json({ message: 'Account created successfully' });
   } catch (err) {
     console.error(err);
@@ -286,6 +332,20 @@ app.put('/api/coach/update-profile', requireAuth, async (req, res) => {
       .select('id, first_name, last_name, email_public, phone_public, bio, image_url, team_name, state, location, age_group, assistant1, assistant2')
       .single();
     if (error) throw error;
+
+    // Update GHL contact when profile is saved
+    upsertGHLCoach({
+      firstName: coach.first_name,
+      lastName:  coach.last_name,
+      email:     coach.email_public,
+      phone:     coach.phone_public,
+      teamName:  coach.team_name,
+      state:     coach.state,
+      city:      coach.location,
+      ageGroup:  coach.age_group,
+      bio:       coach.bio,
+    });
+
     res.json({ message: 'Saved', coach: normalizeCoach(coach) });
   } catch (err) {
     res.status(500).json({ message: err.message || 'Server error' });
