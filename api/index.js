@@ -23,53 +23,56 @@ const supabase = createClient(
 // ── GHL HELPER ────────────────────────────────────────────────────
 async function upsertGHLContact({ completedBy, name, address, city, state, zip, cell, email,
                                    playerName, age, dob, hw, pos1, pos2, tryoutDate }) {
+  const GHL_API_KEY     = process.env.GHL_API_KEY;
+  const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID;
+
+  if (!GHL_API_KEY || !GHL_LOCATION_ID) {
+    console.error('GHL ERROR: GHL_API_KEY or GHL_LOCATION_ID env vars are missing');
+    return { success: false, error: 'GHL env vars not set' };
+  }
+
+  const nameParts = (name || '').trim().split(' ');
+  const firstName = nameParts[0] || '';
+  const lastName  = nameParts.slice(1).join(' ') || '';
+
+  let formattedDob = '';
+  if (dob) {
+    const d = new Date(dob);
+    if (!isNaN(d)) formattedDob = d.toISOString().split('T')[0];
+  }
+
+  let formattedTryoutDate = '';
+  if (tryoutDate) {
+    const d = new Date(tryoutDate);
+    if (!isNaN(d)) formattedTryoutDate = d.toISOString();
+  }
+
+  const payload = {
+    locationId: GHL_LOCATION_ID,
+    firstName,
+    lastName,
+    email:      email   || '',
+    phone:      cell    || '',
+    address1:   address || '',
+    city:       city    || '',
+    state:      state   || '',
+    postalCode: zip     || '',
+    dateOfBirth: formattedDob,
+    tags: ['Baseball Tryout'],
+    customFields: [
+      { key: 'contact.player_name',   value: playerName      || '' },
+      { key: 'contact.position_1',    value: pos1            || '' },
+      { key: 'contact.position_2',    value: pos2            || '' },
+      { key: 'contact.age',           value: age             || '' },
+      { key: 'contact.completed_by',  value: completedBy     || '' },
+      { key: 'contact.tryout_date',   value: formattedTryoutDate  },
+      { key: 'contact.height__weight',value: hw              || '' },
+    ],
+  };
+
+  console.log('GHL payload:', JSON.stringify(payload, null, 2));
+
   try {
-    const GHL_API_KEY     = process.env.GHL_API_KEY;
-    const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID;
-    if (!GHL_API_KEY || !GHL_LOCATION_ID) return;
-
-    // Split parent name into first/last
-    const nameParts = (name || '').trim().split(' ');
-    const firstName = nameParts[0] || '';
-    const lastName  = nameParts.slice(1).join(' ') || '';
-
-    // Format date of birth to YYYY-MM-DD if provided
-    let formattedDob = '';
-    if (dob) {
-      const d = new Date(dob);
-      if (!isNaN(d)) formattedDob = d.toISOString().split('T')[0];
-    }
-
-    // Format tryout date to ISO timestamp for DATE picker field
-    let formattedTryoutDate = '';
-    if (tryoutDate) {
-      const d = new Date(tryoutDate);
-      if (!isNaN(d)) formattedTryoutDate = d.toISOString();
-    }
-
-    const payload = {
-      locationId: GHL_LOCATION_ID,
-      firstName,
-      lastName,
-      email:      email   || '',
-      phone:      cell    || '',
-      address1:   address || '',
-      city:       city    || '',
-      state:      state   || '',
-      postalCode: zip     || '',
-      dateOfBirth: formattedDob,
-      tags: ['Baseball Tryout'],
-      customFields: [
-        { key: 'contact.player_name',   value: playerName      || '' },
-        { key: 'contact.position_1',    value: pos1            || '' },
-        { key: 'contact.position_2',    value: pos2            || '' },
-        { key: 'contact.age',           value: age             || '' },
-        { key: 'contact.completed_by',  value: completedBy     || '' },
-        { key: 'contact.tryout_date',   value: formattedTryoutDate  },
-        { key: 'contact.height__weight',value: hw              || '' },
-      ],
-    };
-
     const response = await axios.post('https://services.leadconnectorhq.com/contacts/upsert', payload, {
       headers: {
         'Authorization': `Bearer ${GHL_API_KEY}`,
@@ -77,10 +80,12 @@ async function upsertGHLContact({ completedBy, name, address, city, state, zip, 
         'Version':       '2021-07-28',
       },
     });
-    console.log('GHL contact upserted successfully', response.data?.contact?.id || '');
+    console.log('GHL contact upserted successfully. Contact ID:', response.data?.contact?.id || 'unknown');
+    return { success: true, contactId: response.data?.contact?.id || '' };
   } catch (err) {
-    // Never block registration if GHL fails
-    console.error('GHL upsert error:', err.message);
+    const errMsg = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    console.error('GHL upsert error:', errMsg);
+    return { success: false, error: errMsg };
   }
 }
 
@@ -553,11 +558,15 @@ app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
       .single();
     if (error) throw error;
 
-    // Upsert contact in GHL (non-blocking — won't fail registration if GHL is down)
-    upsertGHLContact({ completedBy, name, address, city, state, zip, cell, email,
+    // Upsert contact in GHL and include result in response for debugging
+    const ghlResult = await upsertGHLContact({ completedBy, name, address, city, state, zip, cell, email,
                        playerName, age, dob, hw, pos1, pos2, tryoutDate });
 
-    res.status(201).json({ message: 'Registration submitted', registration: data });
+    res.status(201).json({
+      message: 'Registration submitted',
+      registration: data,
+      ghl: ghlResult
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
