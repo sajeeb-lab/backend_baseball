@@ -89,6 +89,54 @@ async function upsertGHLContact({ completedBy, name, address, city, state, zip, 
   }
 }
 
+// ── GHL PLAYER HELPER ─────────────────────────────────────────────
+async function upsertGHLPlayer({ name, email, cell, city, state, position, jersey, gradYear, hw }) {
+  const GHL_API_KEY     = process.env.GHL_API_KEY;
+  const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID;
+  if (!GHL_API_KEY || !GHL_LOCATION_ID) {
+    console.error('GHL ERROR: env vars missing');
+    return;
+  }
+
+  const nameParts = (name || '').trim().split(' ');
+  const firstName = nameParts[0] || '';
+  const lastName  = nameParts.slice(1).join(' ') || '';
+
+  const payload = {
+    locationId: GHL_LOCATION_ID,
+    firstName,
+    lastName,
+    email:  email || '',
+    phone:  cell  || '',
+    city:   city  || '',
+    state:  state || '',
+    tags:   ['Player'],
+    customFields: [
+      { key: 'players_name',   value: name      || '' },
+      { key: 'position',       value: position  || '' },
+      { key: 'grad_year',      value: gradYear  || '' },
+      { key: 'jersey_number',  value: jersey    || '' },
+      { key: 'ht__wt',         value: hw        || '' },
+    ],
+  };
+
+  console.log('GHL Player payload:', JSON.stringify(payload, null, 2));
+
+  try {
+    const response = await axios.post('https://services.leadconnectorhq.com/contacts/upsert', payload, {
+      headers: {
+        'Authorization': `Bearer ${GHL_API_KEY}`,
+        'Content-Type':  'application/json',
+        'Version':       '2021-07-28',
+      },
+    });
+    console.log('GHL player contact upserted. ID:', response.data?.contact?.id || 'unknown');
+  } catch (err) {
+    const errMsg = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    console.error('GHL player upsert error:', errMsg);
+  }
+}
+
 // ── AUTH HELPERS ─────────────────────────────────────────────────
 const signToken = id => jwt.sign({ coachId: id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
@@ -624,15 +672,19 @@ app.get('/api/teams/:id/tryouts', async (req, res) => {
 // POST /api/teams/:id/roster
 app.post('/api/teams/:id/roster', async (req, res) => {
   try {
-    const { name, jersey, gradYear, position, hw, city, state } = req.body;
+    const { name, jersey, gradYear, position, hw, city, state, email, cell } = req.body;
     if (!name) return res.status(400).json({ message: 'Player name is required' });
 
     const { data: player, error } = await supabase
       .from('players')
-      .insert({ coach_id: req.params.id, name, jersey, grad_year: gradYear, position, hw, city, state })
+      .insert({ coach_id: req.params.id, name, jersey, grad_year: gradYear, position, hw, city, state, email: email||'', cell: cell||'' })
       .select()
       .single();
     if (error) throw error;
+
+    // Upsert GHL contact with Player tag
+    upsertGHLPlayer({ name, email, cell, city, state, position, jersey, gradYear, hw });
+
     res.status(201).json({ message: 'Player registered', player: normalizePlayer(player) });
   } catch (err) {
     res.status(500).json({ message: err.message || 'Server error' });
@@ -689,6 +741,8 @@ function normalizePlayer(p) {
     hw:       p.hw       || '',
     city:     p.city     || '',
     state:    p.state    || '',
+    email:    p.email    || '',
+    cell:     p.cell     || '',
   };
 }
 
