@@ -60,13 +60,13 @@ async function upsertGHLContact({ completedBy, name, address, city, state, zip, 
     dateOfBirth: formattedDob,
     tags: ['Baseball Tryout'],
     customFields: [
-      { id: 'contact.player_name',   value: playerName      || '' },
-      { id: 'contact.position_1',    value: pos1            || '' },
-      { id: 'contact.position_2',    value: pos2            || '' },
-      { id: 'contact.age',           value: age             || '' },
-      { id: 'contact.completed_by',  value: completedBy     || '' },
-      { id: 'contact.tryout_date',   value: formattedTryoutDate  },
-      { id: 'contact.height__weight',value: hw              || '' },
+      { key: 'player_name',   value: playerName      || '' },
+      { key: 'position_1',    value: pos1            || '' },
+      { key: 'position_2',    value: pos2            || '' },
+      { key: 'age',           value: age             || '' },
+      { key: 'completed_by',  value: completedBy     || '' },
+      { key: 'tryout_date',   value: formattedTryoutDate  },
+      { key: 'height__weight',value: hw              || '' },
     ],
   };
 
@@ -103,6 +103,25 @@ function requireAuth(req, res, next) {
     res.status(401).json({ message: 'Invalid or expired token' });
   }
 }
+
+// ── TEMP: GET GHL CUSTOM FIELDS (remove after getting IDs) ──────
+app.get('/api/ghl-fields', async (req, res) => {
+  try {
+    const response = await axios.get(
+      `https://services.leadconnectorhq.com/contacts/custom-fields?locationId=${process.env.GHL_LOCATION_ID}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+          'Content-Type': 'application/json',
+          'Version': '2021-07-28',
+        }
+      }
+    );
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: err.response?.data || err.message });
+  }
+});
 
 // ════════════════════════════════════════════════════════════════
 //  AUTH ROUTES
