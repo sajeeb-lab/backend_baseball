@@ -1042,37 +1042,22 @@ app.get('/api/coach/player-payments', requireAuth, async (req, res) => {
   }
 });
 
-// PUT /api/coach/player-payments/:id — mark payment / deposit
-app.put('/api/coach/player-payments/:id', requireAuth, async (req, res) => {
+// PUT /api/coach/player-payments/:id — mark payment / deposit (public)
+app.put('/api/coach/player-payments/:id', async (req, res) => {
   try {
-    const { depositPaid, depositPaidDate, paymentPlan, amountPaid, status } = req.body;
+    const { depositPaid, depositPaidDate, paymentPlan, amountPaid, balance, status } = req.body;
     const update = {};
     if (depositPaid !== undefined)     update.deposit_paid      = depositPaid;
     if (depositPaidDate !== undefined) update.deposit_paid_date = depositPaidDate;
     if (paymentPlan !== undefined)     update.payment_plan      = paymentPlan;
     if (amountPaid !== undefined)      update.amount_paid       = amountPaid;
+    if (balance !== undefined)         update.balance           = balance;
     if (status !== undefined)          update.status            = status;
-
-    // Recalculate balance
-    const { data: existing } = await supabase
-      .from('player_payments')
-      .select('*')
-      .eq('id', req.params.id)
-      .eq('coach_id', req.coachId)
-      .single();
-    if (existing) {
-      const newAmountPaid = amountPaid !== undefined ? amountPaid : existing.amount_paid;
-      update.balance = existing.total_fee - newAmountPaid;
-      if (update.balance <= 0) update.status = 'Paid';
-      else if (newAmountPaid > 0) update.status = 'Partial';
-      else update.status = 'Pending';
-    }
 
     const { data, error } = await supabase
       .from('player_payments')
       .update(update)
       .eq('id', req.params.id)
-      .eq('coach_id', req.coachId)
       .select().single();
     if (error) throw error;
     res.json({ message: 'Updated', payment: data });
