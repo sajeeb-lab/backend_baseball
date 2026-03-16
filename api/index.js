@@ -1144,15 +1144,16 @@ app.get('/api/coach/player-payments', requireAuth, async (req, res) => {
   }
 });
 
-// POST /api/coach/player-payments — create payment record for a player
-app.post('/api/coach/player-payments', requireAuth, async (req, res) => {
+// POST /api/coach/player-payments — create payment record for a player (public — called from team.html)
+app.post('/api/coach/player-payments', async (req, res) => {
   try {
-    const { playerId, playerName, totalFee, depositAmount, depositEnabled,
+    const { coachId, playerId, playerName, totalFee, depositAmount, depositEnabled,
             paymentPlan, balance, registeredDate, paymentDeadline } = req.body;
+    if (!coachId) return res.status(400).json({ message: 'coachId is required' });
     const { data, error } = await supabase
       .from('player_payments')
       .insert({
-        coach_id:         req.coachId,
+        coach_id:         coachId,
         player_id:        playerId        || null,
         player_name:      playerName      || '',
         total_fee:        totalFee        || 0,
@@ -1305,15 +1306,16 @@ app.get('/api/coach/player-payments', requireAuth, async (req, res) => {
   }
 });
 
-// POST /api/coach/player-payments — create payment record for a player
-app.post('/api/coach/player-payments', requireAuth, async (req, res) => {
+// POST /api/coach/player-payments — create payment record for a player (public — called from team.html)
+app.post('/api/coach/player-payments', async (req, res) => {
   try {
-    const { playerId, playerName, totalFee, depositAmount, depositEnabled,
+    const { coachId, playerId, playerName, totalFee, depositAmount, depositEnabled,
             paymentPlan, balance, registeredDate, paymentDeadline } = req.body;
+    if (!coachId) return res.status(400).json({ message: 'coachId is required' });
     const { data, error } = await supabase
       .from('player_payments')
       .insert({
-        coach_id:         req.coachId,
+        coach_id:         coachId,
         player_id:        playerId,
         player_name:      playerName      || '',
         total_fee:        totalFee        || 0,
@@ -1355,21 +1357,6 @@ app.put('/api/coach/player-payments/:paymentId', requireAuth, async (req, res) =
       .single();
     if (error) throw error;
     res.json({ message: 'Updated', payment: data });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// GET /api/teams/:id/financials — public, player registration needs this
-app.get('/api/teams/:id/financials', async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('team_financials')
-      .select('*')
-      .eq('coach_id', req.params.id)
-      .single();
-    if (error && error.code !== 'PGRST116') throw error;
-    res.json({ financials: data || null });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
