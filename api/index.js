@@ -392,13 +392,13 @@ app.get('/api/coach/tryouts', requireAuth, async (req, res) => {
 // POST /api/coach/tryouts
 app.post('/api/coach/tryouts', requireAuth, async (req, res) => {
   try {
-    const { date, time, location, fee } = req.body;
+    const { date, time, location, fee, city, state } = req.body;
     if (!date || !time || !location || !fee)
       return res.status(400).json({ message: 'date, time, location and fee are all required' });
 
     const { data: tryout, error } = await supabase
       .from('tryouts')
-      .insert({ coach_id: req.coachId, date, time, location, fee })
+      .insert({ coach_id: req.coachId, date, time, location, fee, city: city||'', state: state||'' })
       .select()
       .single();
     if (error) throw error;
@@ -411,12 +411,12 @@ app.post('/api/coach/tryouts', requireAuth, async (req, res) => {
 // PUT /api/coach/tryouts/:tryoutId
 app.put('/api/coach/tryouts/:tryoutId', requireAuth, async (req, res) => {
   try {
-    const { date, time, location, fee } = req.body;
+    const { date, time, location, fee, city, state } = req.body;
     if (!date || !time || !location)
       return res.status(400).json({ message: 'date, time and location are required' });
     const { data: tryout, error } = await supabase
       .from('tryouts')
-      .update({ date, time, location, fee: fee || 'Free' })
+      .update({ date, time, location, fee: fee || 'Free', city: city||'', state: state||'' })
       .eq('id', req.params.tryoutId)
       .eq('coach_id', req.coachId)
       .select()
@@ -810,7 +810,7 @@ function normalizeCoach(c) {
 }
 
 function normalizeTryout(t) {
-  return { _id: t.id, date: t.date, time: t.time, location: t.location, fee: t.fee };
+  return { _id: t.id, date: t.date, time: t.time, location: t.location, fee: t.fee, city: t.city||'', state: t.state||'' };
 }
 
 function normalizePlayer(p) {
