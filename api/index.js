@@ -220,7 +220,7 @@ app.get('/api/ghl-fields', async (req, res) => {
 // POST /api/coach/register
 app.post('/api/coach/register', async (req, res) => {
   try {
-    const { firstName, lastName, email, phone, teamName, state, password } = req.body;
+    const { firstName, lastName, email, phone, teamName, state, ageGroup, password } = req.body;
     if (!firstName || !lastName || !email || !phone || !teamName || !password)
       return res.status(400).json({ message: 'All fields are required' });
     if (password.length < 8)
@@ -242,6 +242,7 @@ app.post('/api/coach/register', async (req, res) => {
       phone,
       team_name:    teamName,
       state:        state ? state.toUpperCase() : '',
+      age_group:    ageGroup || '',
       password:     hashed,
       email_public: email.toLowerCase(),
       phone_public: phone,
@@ -402,6 +403,26 @@ app.post('/api/coach/tryouts', requireAuth, async (req, res) => {
       .single();
     if (error) throw error;
     res.status(201).json({ message: 'Tryout added', tryout: normalizeTryout(tryout) });
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'Server error' });
+  }
+});
+
+// PUT /api/coach/tryouts/:tryoutId
+app.put('/api/coach/tryouts/:tryoutId', requireAuth, async (req, res) => {
+  try {
+    const { date, time, location, fee } = req.body;
+    if (!date || !time || !location)
+      return res.status(400).json({ message: 'date, time and location are required' });
+    const { data: tryout, error } = await supabase
+      .from('tryouts')
+      .update({ date, time, location, fee: fee || 'Free' })
+      .eq('id', req.params.tryoutId)
+      .eq('coach_id', req.coachId)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ message: 'Tryout updated', tryout: normalizeTryout(tryout) });
   } catch (err) {
     res.status(500).json({ message: err.message || 'Server error' });
   }
