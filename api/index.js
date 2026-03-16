@@ -1176,7 +1176,7 @@ app.post('/api/coach/player-payments', async (req, res) => {
 });
 
 // PUT /api/coach/player-payments/:paymentId — mark payment / deposit
-app.put('/api/coach/player-payments/:paymentId', requireAuth, async (req, res) => {
+app.put('/api/coach/player-payments/:paymentId', async (req, res) => {
   try {
     const { depositPaid, depositPaidDate, paymentPlan, amountPaid } = req.body;
     const { data: existing } = await supabase
@@ -1338,7 +1338,7 @@ app.post('/api/coach/player-payments', async (req, res) => {
 });
 
 // PUT /api/coach/player-payments/:paymentId — mark deposit or monthly payment
-app.put('/api/coach/player-payments/:paymentId', requireAuth, async (req, res) => {
+app.put('/api/coach/player-payments/:paymentId', async (req, res) => {
   try {
     const { depositPaid, depositPaidDate, paymentPlan, amountPaid, balance, status } = req.body;
     const update = {};
