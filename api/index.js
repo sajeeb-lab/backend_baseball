@@ -294,7 +294,7 @@ app.get('/api/coach/me', requireAuth, async (req, res) => {
   try {
     const { data: coach, error } = await supabase
       .from('coaches')
-      .select('id, first_name, last_name, email_public, phone_public, bio, image_url, team_name, state, location, age_group, assistant1, assistant2')
+      .select('id, first_name, last_name, email_public, phone_public, bio, image_url, team_name, state, location, age_group, team_details, assistant1, assistant2')
       .eq('id', req.coachId)
       .single();
     if (error || !coach) return res.status(404).json({ message: 'Coach not found' });
@@ -320,6 +320,7 @@ app.put('/api/coach/update-profile', requireAuth, async (req, res) => {
       state:       'state',
       location:    'location',
       ageGroup:    'age_group',
+      teamDetails: 'team_details',
     };
     const update = {};
     Object.entries(map).forEach(([jsKey, dbKey]) => {
@@ -331,7 +332,7 @@ app.put('/api/coach/update-profile', requireAuth, async (req, res) => {
       .from('coaches')
       .update(update)
       .eq('id', req.coachId)
-      .select('id, first_name, last_name, email_public, phone_public, bio, image_url, team_name, state, location, age_group, assistant1, assistant2')
+      .select('id, first_name, last_name, email_public, phone_public, bio, image_url, team_name, state, location, age_group, team_details, assistant1, assistant2')
       .single();
     if (error) throw error;
 
@@ -365,7 +366,7 @@ app.put('/api/coach/update-assistants', requireAuth, async (req, res) => {
       .from('coaches')
       .update(update)
       .eq('id', req.coachId)
-      .select('id, first_name, last_name, email_public, phone_public, bio, image_url, team_name, state, location, age_group, assistant1, assistant2')
+      .select('id, first_name, last_name, email_public, phone_public, bio, image_url, team_name, state, location, age_group, team_details, assistant1, assistant2')
       .single();
     if (error) throw error;
     res.json({ message: 'Saved', coach: normalizeCoach(coach) });
@@ -675,7 +676,7 @@ app.get('/api/teams/:id', async (req, res) => {
   try {
     const { data: team, error } = await supabase
       .from('coaches')
-      .select('id, first_name, last_name, email_public, phone_public, bio, image_url, team_name, state, location, age_group, assistant1, assistant2')
+      .select('id, first_name, last_name, email_public, phone_public, bio, image_url, team_name, state, location, age_group, team_details, assistant1, assistant2')
       .eq('id', req.params.id)
       .single();
     if (error || !team) return res.status(404).json({ message: 'Team not found' });
@@ -804,6 +805,7 @@ function normalizeCoach(c) {
     state:       c.state         || '',
     location:    c.location      || '',
     ageGroup:    c.age_group     || '',
+    teamDetails: c.team_details  || '',
     assistant1:  c.assistant1    || {},
     assistant2:  c.assistant2    || {},
   };
@@ -978,128 +980,21 @@ app.get('/api/coach/financials', requireAuth, async (req, res) => {
   }
 });
 
-// POST /api/coach/financials — create or update
-app.post('/api/coach/financials', requireAuth, async (req, res) => {
-  try {
-    const { playerFee, paymentDeadline, fullPayOnly, depositEnabled, depositAmount, monthlyPayments } = req.body;
-    const { data: existing } = await supabase
-      .from('team_financials')
-      .select('id')
-      .eq('coach_id', req.coachId)
-      .single();
-
-    let result;
-    if (existing) {
-      const { data, error } = await supabase
-        .from('team_financials')
-        .update({
-          player_fee: playerFee || 0,
-          payment_deadline: paymentDeadline || '',
-          full_pay_only: fullPayOnly !== false,
-          deposit_enabled: depositEnabled || false,
-          deposit_amount: depositAmount || 250,
-          monthly_payments: monthlyPayments || false,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('coach_id', req.coachId)
-        .select().single();
-      if (error) throw error;
-      result = data;
-    } else {
-      const { data, error } = await supabase
-        .from('team_financials')
-        .insert({
-          coach_id: req.coachId,
-          player_fee: playerFee || 0,
-          payment_deadline: paymentDeadline || '',
-          full_pay_only: fullPayOnly !== false,
-          deposit_enabled: depositEnabled || false,
-          deposit_amount: depositAmount || 250,
-          monthly_payments: monthlyPayments || false,
-        })
-        .select().single();
-      if (error) throw error;
-      result = data;
-    }
-    res.json({ message: 'Saved', financials: result });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// GET /api/coach/player-payments
-app.get('/api/coach/player-payments', requireAuth, async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('player_payments')
-      .select('*')
-      .eq('coach_id', req.coachId)
-      .order('created_at', { ascending: false });
-    if (error) throw error;
-    res.json({ payments: data || [] });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// PUT /api/coach/player-payments/:id — mark payment / deposit (public)
-app.put('/api/coach/player-payments/:id', async (req, res) => {
-  try {
-    const { depositPaid, depositPaidDate, paymentPlan, amountPaid, balance, status } = req.body;
-    const update = {};
-    if (depositPaid !== undefined)     update.deposit_paid      = depositPaid;
-    if (depositPaidDate !== undefined) update.deposit_paid_date = depositPaidDate;
-    if (paymentPlan !== undefined)     update.payment_plan      = paymentPlan;
-    if (amountPaid !== undefined)      update.amount_paid       = amountPaid;
-    if (balance !== undefined)         update.balance           = balance;
-    if (status !== undefined)          update.status            = status;
-
-    const { data, error } = await supabase
-      .from('player_payments')
-      .update(update)
-      .eq('id', req.params.id)
-      .select().single();
-    if (error) throw error;
-    res.json({ message: 'Updated', payment: data });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ════════════════════════════════════════════════════════════════
-//  TEAM FINANCIALS ROUTES
-// ════════════════════════════════════════════════════════════════
-
-// GET /api/coach/financials
-app.get('/api/coach/financials', requireAuth, async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('team_financials')
-      .select('*')
-      .eq('coach_id', req.coachId)
-      .single();
-    if (error && error.code !== 'PGRST116') throw error;
-    res.json({ financials: data || null });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// POST /api/coach/financials — upsert (create or update)
+// POST /api/coach/financials — create or update (upsert)
 app.post('/api/coach/financials', requireAuth, async (req, res) => {
   try {
     const { playerFee, paymentDeadline, fullPayOnly, depositEnabled, depositAmount, monthlyPayments } = req.body;
     const { data, error } = await supabase
       .from('team_financials')
       .upsert({
-        coach_id:          req.coachId,
-        player_fee:        playerFee       || 0,
-        payment_deadline:  paymentDeadline || '',
-        full_pay_only:     fullPayOnly     !== undefined ? fullPayOnly     : true,
-        deposit_enabled:   depositEnabled  !== undefined ? depositEnabled  : false,
-        deposit_amount:    depositAmount   || 250,
-        monthly_payments:  monthlyPayments !== undefined ? monthlyPayments : false,
-        updated_at:        new Date().toISOString(),
+        coach_id:         req.coachId,
+        player_fee:       playerFee       || 0,
+        payment_deadline: paymentDeadline || '',
+        full_pay_only:    fullPayOnly     !== false,
+        deposit_enabled:  depositEnabled  || false,
+        deposit_amount:   depositAmount   || 250,
+        monthly_payments: monthlyPayments || false,
+        updated_at:       new Date().toISOString(),
       }, { onConflict: 'coach_id' })
       .select()
       .single();
@@ -1160,39 +1055,21 @@ app.post('/api/coach/player-payments', async (req, res) => {
   }
 });
 
-// PUT /api/coach/player-payments/:paymentId — mark payment / deposit
+// PUT /api/coach/player-payments/:paymentId — mark deposit or monthly payment
 app.put('/api/coach/player-payments/:paymentId', async (req, res) => {
   try {
-    const { depositPaid, depositPaidDate, paymentPlan, amountPaid } = req.body;
-    const { data: existing } = await supabase
-      .from('player_payments')
-      .select('*')
-      .eq('id', req.params.paymentId)
-      .eq('coach_id', req.coachId)
-      .single();
-    if (!existing) return res.status(404).json({ message: 'Not found' });
-
-    const updatedPlan    = paymentPlan || existing.payment_plan;
-    const paidFromPlan   = updatedPlan.filter(p => p.paid).reduce((s, p) => s + (p.amount || 0), 0);
-    const depositPaidAmt = (depositPaid !== undefined ? depositPaid : existing.deposit_paid) ? existing.deposit_amount : 0;
-    const newAmountPaid  = amountPaid !== undefined ? amountPaid : depositPaidAmt + paidFromPlan;
-    const newBalance     = existing.total_fee - newAmountPaid;
-    const newStatus      = newBalance <= 0 ? 'Paid' : newAmountPaid > 0 ? 'Partial' : 'Pending';
-
-    const update = {
-      payment_plan:       updatedPlan,
-      amount_paid:        newAmountPaid,
-      balance:            newBalance,
-      status:             newStatus,
-    };
-    if (depositPaid !== undefined)   update.deposit_paid      = depositPaid;
+    const { depositPaid, depositPaidDate, paymentPlan, amountPaid, balance, status } = req.body;
+    const update = {};
+    if (depositPaid !== undefined)     update.deposit_paid      = depositPaid;
     if (depositPaidDate !== undefined) update.deposit_paid_date = depositPaidDate;
-
+    if (paymentPlan !== undefined)     update.payment_plan      = paymentPlan;
+    if (amountPaid !== undefined)      update.amount_paid       = amountPaid;
+    if (balance !== undefined)         update.balance           = balance;
+    if (status !== undefined)          update.status            = status;
     const { data, error } = await supabase
       .from('player_payments')
       .update(update)
       .eq('id', req.params.paymentId)
-      .eq('coach_id', req.coachId)
       .select()
       .single();
     if (error) throw error;
@@ -1227,121 +1104,6 @@ app.get('/api/teams/:id/financials', async (req, res) => {
       .single();
     if (error && error.code !== 'PGRST116') throw error;
     res.json({ financials: data || null });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ════════════════════════════════════════════════════════════════
-//  TEAM FINANCIALS ROUTES
-// ════════════════════════════════════════════════════════════════
-
-// GET /api/coach/financials
-app.get('/api/coach/financials', requireAuth, async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('team_financials')
-      .select('*')
-      .eq('coach_id', req.coachId)
-      .single();
-    if (error && error.code !== 'PGRST116') throw error;
-    res.json({ financials: data || null });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// POST /api/coach/financials — create or update (upsert)
-app.post('/api/coach/financials', requireAuth, async (req, res) => {
-  try {
-    const { playerFee, paymentDeadline, fullPayOnly, depositEnabled, depositAmount, monthlyPayments } = req.body;
-    const { data, error } = await supabase
-      .from('team_financials')
-      .upsert({
-        coach_id:         req.coachId,
-        player_fee:       playerFee       || 0,
-        payment_deadline: paymentDeadline || '',
-        full_pay_only:    fullPayOnly     !== false,
-        deposit_enabled:  depositEnabled  || false,
-        deposit_amount:   depositAmount   || 250,
-        monthly_payments: monthlyPayments || false,
-        updated_at:       new Date().toISOString(),
-      }, { onConflict: 'coach_id' })
-      .select()
-      .single();
-    if (error) throw error;
-    res.json({ message: 'Saved', financials: data });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// GET /api/coach/player-payments
-app.get('/api/coach/player-payments', requireAuth, async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('player_payments')
-      .select('*')
-      .eq('coach_id', req.coachId)
-      .order('created_at', { ascending: false });
-    if (error) throw error;
-    res.json({ payments: data || [] });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// POST /api/coach/player-payments — create payment record for a player (public — called from team.html)
-app.post('/api/coach/player-payments', async (req, res) => {
-  try {
-    const { coachId, playerId, playerName, totalFee, depositAmount, depositEnabled,
-            paymentPlan, balance, registeredDate, paymentDeadline } = req.body;
-    if (!coachId) return res.status(400).json({ message: 'coachId is required' });
-    const { data, error } = await supabase
-      .from('player_payments')
-      .insert({
-        coach_id:         coachId,
-        player_id:        playerId,
-        player_name:      playerName      || '',
-        total_fee:        totalFee        || 0,
-        deposit_amount:   depositAmount   || 0,
-        deposit_paid:     false,
-        payment_plan:     paymentPlan     || [],
-        amount_paid:      0,
-        balance:          balance         || totalFee || 0,
-        status:           'Pending',
-        registered_date:  registeredDate  || '',
-        payment_deadline: paymentDeadline || '',
-      })
-      .select()
-      .single();
-    if (error) throw error;
-    res.status(201).json({ message: 'Payment record created', payment: data });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// PUT /api/coach/player-payments/:paymentId — mark deposit or monthly payment
-app.put('/api/coach/player-payments/:paymentId', async (req, res) => {
-  try {
-    const { depositPaid, depositPaidDate, paymentPlan, amountPaid, balance, status } = req.body;
-    const update = {};
-    if (depositPaid !== undefined)     update.deposit_paid      = depositPaid;
-    if (depositPaidDate !== undefined) update.deposit_paid_date = depositPaidDate;
-    if (paymentPlan !== undefined)     update.payment_plan      = paymentPlan;
-    if (amountPaid !== undefined)      update.amount_paid       = amountPaid;
-    if (balance !== undefined)         update.balance           = balance;
-    if (status !== undefined)          update.status            = status;
-    const { data, error } = await supabase
-      .from('player_payments')
-      .update(update)
-      .eq('id', req.params.paymentId)
-      .eq('coach_id', req.coachId)
-      .select()
-      .single();
-    if (error) throw error;
-    res.json({ message: 'Updated', payment: data });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
