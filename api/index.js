@@ -959,5 +959,85 @@ function normalizeGame(g) {
   };
 }
 
+// ════════════════════════════════════════════════════════════════
+//  BUDGET ROUTES
+// ════════════════════════════════════════════════════════════════
+
+// GET /api/coach/budgets
+app.get('/api/coach/budgets', requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('budgets')
+      .select('*')
+      .eq('coach_id', req.coachId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ budgets: data || [] });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// POST /api/coach/budgets
+app.post('/api/coach/budgets', requireAuth, async (req, res) => {
+  try {
+    const {
+      date, players, seasons, numEvents, eventCost, tournaments,
+      headPay, asstPay, rentals, gas, hotelNights, hotelAvg, hotels,
+      numUniforms, uniformCost, uniforms, equipment, insurance,
+      ambassadors, others, total, perPlayer
+    } = req.body;
+
+    const { data, error } = await supabase
+      .from('budgets')
+      .insert({
+        coach_id:     req.coachId,
+        date,
+        players:      players      || 0,
+        seasons:      seasons      || 0,
+        num_events:   numEvents    || 0,
+        event_cost:   eventCost    || 0,
+        tournaments:  tournaments  || 0,
+        head_pay:     headPay      || 0,
+        asst_pay:     asstPay      || 0,
+        rentals:      rentals      || 0,
+        gas:          gas          || 0,
+        hotel_nights: hotelNights  || 0,
+        hotel_avg:    hotelAvg     || 0,
+        hotels:       hotels       || 0,
+        num_uniforms: numUniforms  || 0,
+        uniform_cost: uniformCost  || 0,
+        uniforms:     uniforms     || 0,
+        equipment:    equipment    || 0,
+        insurance:    insurance    || 0,
+        ambassadors:  450,
+        others:       others       || [],
+        total:        total        || 0,
+        per_player:   perPlayer    || 0,
+      })
+      .select()
+      .single();
+    if (error) throw error;
+    res.status(201).json({ message: 'Budget saved', budget: data });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// DELETE /api/coach/budgets/:budgetId
+app.delete('/api/coach/budgets/:budgetId', requireAuth, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('budgets')
+      .delete()
+      .eq('id', req.params.budgetId)
+      .eq('coach_id', req.coachId);
+    if (error) throw error;
+    res.json({ message: 'Budget deleted' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 module.exports = app;
 module.exports.default = app;
