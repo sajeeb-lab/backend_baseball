@@ -902,11 +902,11 @@ app.get('/api/coach/schedule', requireAuth, async (req, res) => {
 // POST /api/coach/schedule — add a game
 app.post('/api/coach/schedule', requireAuth, async (req, res) => {
   try {
-    const { date, event, city, state } = req.body;
-    if (!date || !event) return res.status(400).json({ message: 'Date and event are required' });
+    const { startDate, endDate, event, city, state } = req.body;
+    if (!startDate || !endDate || !event) return res.status(400).json({ message: 'Start date, end date, and event are required' });
     const { data, error } = await supabase
       .from('schedule')
-      .insert([{ coach_id: req.coachId, date, event, city: city||'', state: state||'', date_sort: date }])
+      .insert([{ coach_id: req.coachId, start_date: startDate, end_date: endDate, event, city: city||'', state: state||'', date_sort: startDate }])
       .select()
       .single();
     if (error) throw error;
@@ -920,11 +920,11 @@ app.post('/api/coach/schedule', requireAuth, async (req, res) => {
 // PUT /api/coach/schedule/:gameId — edit a game
 app.put('/api/coach/schedule/:gameId', requireAuth, async (req, res) => {
   try {
-    const { date, event, city, state } = req.body;
-    if (!date || !event) return res.status(400).json({ message: 'Date and event are required' });
+    const { startDate, endDate, event, city, state } = req.body;
+    if (!startDate || !endDate || !event) return res.status(400).json({ message: 'Start date, end date, and event are required' });
     const { data, error } = await supabase
       .from('schedule')
-      .update({ date, event, city: city||'', state: state||'', date_sort: date })
+      .update({ start_date: startDate, end_date: endDate, event, city: city||'', state: state||'', date_sort: startDate })
       .eq('id', req.params.gameId)
       .eq('coach_id', req.coachId)
       .select()
@@ -953,11 +953,12 @@ app.delete('/api/coach/schedule/:gameId', requireAuth, async (req, res) => {
 
 function normalizeGame(g) {
   return {
-    _id:    g.id,
-    date:   g.date   || '',
-    event:  g.event  || '',
-    city:   g.city   || '',
-    state:  g.state  || '',
+    _id:       g.id,
+    startDate: g.start_date || '',
+    endDate:   g.end_date   || '',
+    event:     g.event      || '',
+    city:      g.city       || '',
+    state:     g.state      || '',
   };
 }
 
