@@ -906,7 +906,7 @@ app.post('/api/coach/schedule', requireAuth, async (req, res) => {
     if (!startDate || !endDate || !event) return res.status(400).json({ message: 'Start date, end date, and event are required' });
     const { data, error } = await supabase
       .from('schedule')
-      .insert([{ coach_id: req.coachId, start_date: startDate, end_date: endDate, event, city: city||'', state: state||'', date_sort: startDate }])
+      .insert([{ coach_id: req.coachId, date: startDate, start_date: startDate, end_date: endDate, event, city: city||'', state: state||'', date_sort: startDate }])
       .select()
       .single();
     if (error) throw error;
@@ -924,7 +924,7 @@ app.put('/api/coach/schedule/:gameId', requireAuth, async (req, res) => {
     if (!startDate || !endDate || !event) return res.status(400).json({ message: 'Start date, end date, and event are required' });
     const { data, error } = await supabase
       .from('schedule')
-      .update({ start_date: startDate, end_date: endDate, event, city: city||'', state: state||'', date_sort: startDate })
+      .update({ date: startDate, start_date: startDate, end_date: endDate, event, city: city||'', state: state||'', date_sort: startDate })
       .eq('id', req.params.gameId)
       .eq('coach_id', req.coachId)
       .select()
