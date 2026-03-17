@@ -20,9 +20,9 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// ── GHL HELPER ────────────────────────────────────────────────────
+// ── GHL TRYOUT HELPER ────────────────────────────────────────────
 async function upsertGHLContact({ completedBy, name, address, city, state, zip, cell, email,
-                                   playerName, age, dob, hw, pos1, pos2, tryoutDate }) {
+                                   playerName, age, dob, hw, pos1, pos2 }) {
   const GHL_API_KEY     = process.env.GHL_API_KEY;
   const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID;
 
@@ -35,16 +35,16 @@ async function upsertGHLContact({ completedBy, name, address, city, state, zip, 
   const firstName = nameParts[0] || '';
   const lastName  = nameParts.slice(1).join(' ') || '';
 
+  // Format DOB from dd/mm/yyyy to YYYY-MM-DD
   let formattedDob = '';
   if (dob) {
-    const d = new Date(dob);
-    if (!isNaN(d)) formattedDob = d.toISOString().split('T')[0];
-  }
-
-  let formattedTryoutDate = '';
-  if (tryoutDate) {
-    const d = new Date(tryoutDate);
-    if (!isNaN(d)) formattedTryoutDate = d.toISOString();
+    const parts = dob.split('/');
+    if (parts.length === 3) {
+      const day = parts[0];
+      const month = parts[1];
+      const year = parts[2];
+      formattedDob = `${year}-${month}-${day}`;
+    }
   }
 
   const payload = {
@@ -58,19 +58,18 @@ async function upsertGHLContact({ completedBy, name, address, city, state, zip, 
     state:      state   || '',
     postalCode: zip     || '',
     dateOfBirth: formattedDob,
-    tags: ['Baseball Tryout'],
+    tags: ['tryout'],
     customFields: [
       { key: 'player_name',   value: playerName      || '' },
       { key: 'position_1',    value: pos1            || '' },
       { key: 'position_2',    value: pos2            || '' },
       { key: 'age',           value: age             || '' },
       { key: 'completed_by',  value: completedBy     || '' },
-      { key: 'tryout_date',   value: formattedTryoutDate  },
       { key: 'height__weight',value: hw              || '' },
     ],
   };
 
-  console.log('GHL payload:', JSON.stringify(payload, null, 2));
+  console.log('GHL Tryout payload:', JSON.stringify(payload, null, 2));
 
   try {
     const response = await axios.post('https://services.leadconnectorhq.com/contacts/upsert', payload, {
@@ -80,11 +79,11 @@ async function upsertGHLContact({ completedBy, name, address, city, state, zip, 
         'Version':       '2021-07-28',
       },
     });
-    console.log('GHL contact upserted successfully. Contact ID:', response.data?.contact?.id || 'unknown');
+    console.log('GHL tryout contact upserted successfully. Contact ID:', response.data?.contact?.id || 'unknown');
     return { success: true, contactId: response.data?.contact?.id || '' };
   } catch (err) {
     const errMsg = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-    console.error('GHL upsert error:', errMsg);
+    console.error('GHL tryout upsert error:', errMsg);
     return { success: false, error: errMsg };
   }
 }
@@ -691,7 +690,7 @@ app.get('/api/teams/:id', async (req, res) => {
 app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
   try {
     const { completedBy, name, address, city, state, zip, cell, email,
-            playerName, age, dob, hw, pos1, pos2, tryoutDate } = req.body;
+            playerName, age, dob, hw, pos1, pos2 } = req.body;
     if (!name || !playerName) return res.status(400).json({ message: 'Name and player name are required' });
     const { data, error } = await supabase
       .from('tryout_registrations')
@@ -701,16 +700,15 @@ app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
         name, address: address||'', city: city||'', state: state||'', zip: zip||'',
         cell: cell||'', email: email||'',
         player_name: playerName, age: age||'', dob: dob||'', hw: hw||'',
-        pos1: pos1||'', pos2: pos2||'',
-        tryout_date: tryoutDate||''
+        pos1: pos1||'', pos2: pos2||''
       }])
       .select()
       .single();
     if (error) throw error;
 
-    // Upsert contact in GHL and include result in response for debugging
+    // Upsert contact in GHL
     const ghlResult = await upsertGHLContact({ completedBy, name, address, city, state, zip, cell, email,
-                       playerName, age, dob, hw, pos1, pos2, tryoutDate });
+                       playerName, age, dob, hw, pos1, pos2 });
 
     res.status(201).json({
       message: 'Registration submitted',
