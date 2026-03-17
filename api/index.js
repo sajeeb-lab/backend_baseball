@@ -1161,7 +1161,7 @@ app.post('/api/coach/budgets', requireAuth, async (req, res) => {
         uniforms:     uniforms     || 0,
         equipment:    equipment    || 0,
         insurance:    insurance    || 0,
-        ambassadors:  ambassadors  || 0,
+        ambassadors:  450,
         others:       others       || [],
         total:        total        || 0,
         per_player:   perPlayer    || 0,
