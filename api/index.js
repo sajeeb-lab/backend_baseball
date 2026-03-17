@@ -834,12 +834,12 @@ function normalizePlayer(p) {
 // PUT /api/teams/:id/roster/:playerId — edit a player
 app.put('/api/teams/:id/roster/:playerId', requireAuth, async (req, res) => {
   try {
-    const { name, jersey, gradYear, position, hw, city, state } = req.body;
+    const { name, jersey, gradYear, position, hw, city, state, email, cell } = req.body;
     if (!name) return res.status(400).json({ message: 'Player name is required' });
 
     const { data: player, error } = await supabase
       .from('players')
-      .update({ name, jersey, grad_year: gradYear, position, hw, city, state })
+      .update({ name, jersey, grad_year: gradYear, position, hw, city, state, email, cell })
       .eq('id', req.params.playerId)
       .eq('coach_id', req.params.id)
       .select()
