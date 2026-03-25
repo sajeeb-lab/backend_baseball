@@ -6,6 +6,53 @@ const axios    = require('axios');
 const mongoose = require('mongoose');
 const FormData = require('form-data');
 const crypto   = require('crypto');
+const nodemailer = require('nodemailer');
+
+// ── EMAIL TRANSPORTER ─────────────────────────────────────────
+function createTransporter() {
+  return nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.EMAIL_USER,  // your Gmail address
+      pass: process.env.EMAIL_PASS,  // Gmail App Password (16-char, no spaces)
+    },
+  });
+}
+
+async function sendOTPEmail(toEmail, otp, purpose) {
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    console.warn('⚠️  EMAIL_USER / EMAIL_PASS not set — skipping email send. OTP:', otp);
+    return; // In dev, OTP is still returned in the API response for testing
+  }
+  const subject = purpose === 'reset'
+    ? 'Ambassadors Baseball – Password Reset Code'
+    : 'Ambassadors Baseball – Verify Your Identity';
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:24px;border:1px solid #dce3ec;border-radius:8px">
+      <div style="background:#0a1628;padding:16px 20px;border-radius:6px 6px 0 0;margin:-24px -24px 24px">
+        <h2 style="color:#fff;margin:0;font-size:1.1rem;letter-spacing:.05em;text-transform:uppercase">Ambassadors Baseball</h2>
+      </div>
+      <p style="color:#1a1a2e;font-size:.95rem;margin-bottom:8px">
+        ${purpose === 'reset'
+          ? 'You requested a password reset. Use the code below to set a new password:'
+          : 'Use the code below to verify your identity and change your password:'}
+      </p>
+      <div style="text-align:center;margin:24px 0">
+        <span style="display:inline-block;background:#f4f6f9;border:2px dashed #c8102e;border-radius:8px;padding:14px 32px;font-size:2rem;font-weight:700;letter-spacing:.35em;color:#0a1628;font-family:monospace">${otp}</span>
+      </div>
+      <p style="color:#5a6a7a;font-size:.82rem;margin:0">This code expires in <strong>10 minutes</strong>. If you didn't request this, you can safely ignore this email.</p>
+    </div>`;
+  await createTransporter().sendMail({
+    from: `"Ambassadors Baseball" <${process.env.EMAIL_USER}>`,
+    to: toEmail,
+    subject,
+    html,
+  });
+}
+
+function generateOTP() {
+  return String(Math.floor(100000 + crypto.randomInt(900000))).padStart(6, '0');
+}
 
 // ── ENV VALIDATION ────────────────────────────────────────────────
 const REQUIRED_ENV = ['MONGODB_URI', 'JWT_SECRET', 'GHL_API_KEY', 'GHL_LOCATION_ID'];
@@ -51,11 +98,13 @@ const coachSchema = new mongoose.Schema({
   assistant1:   { type: mongoose.Schema.Types.Mixed, default: {} },
   assistant2:   { type: mongoose.Schema.Types.Mixed, default: {} },
   active:             { type: Boolean, default: true },
-  reset_token:        { type: String, default: null },
-  reset_token_expiry: { type: Date,   default: null },
+  otp_code:           { type: String,  default: null },
+  otp_expiry:         { type: Date,    default: null },
+  otp_purpose:        { type: String,  default: null }, // 'reset'
+  reset_token:        { type: String,  default: null }, // kept for backward compat
+  reset_token_expiry: { type: Date,    default: null },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 // Indexes
-coachSchema.index({ email: 1 });
 coachSchema.index({ active: 1 });
 
 const tryoutSchema = new mongoose.Schema({
@@ -125,7 +174,6 @@ const teamFinancialsSchema = new mongoose.Schema({
   deposit_amount:   { type: Number, default: 250 },
   monthly_payments: { type: Boolean, default: false },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
-teamFinancialsSchema.index({ coach_id: 1 });
 
 const playerPaymentSchema = new mongoose.Schema({
   coach_id:          { type: mongoose.Schema.Types.ObjectId, ref: 'Coach', required: true },
@@ -472,33 +520,30 @@ app.post('/api/coach/login', async (req, res) => {
   }
 });
 
-// POST /api/coach/forgot-password
+// POST /api/coach/forgot-password  — step 1: send OTP to email
 app.post('/api/coach/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ message: 'Email is required' });
 
     const coach = await Coach.findOne({ email: email.toLowerCase().trim() });
-    // Always return success to avoid user enumeration
-    if (!coach) return res.json({ message: 'If that email exists, a reset link has been sent.' });
+    // Always respond the same way to avoid user enumeration
+    if (!coach) return res.json({ message: 'If that email exists, a 6-digit code has been sent.' });
 
-    const token  = crypto.randomBytes(32).toString('hex');
-    const expiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+    const otp    = generateOTP();
+    const expiry = new Date(Date.now() + 10 * 60 * 1000); // 10 min
 
     await Coach.findByIdAndUpdate(coach._id, {
-      reset_token:        token,
-      reset_token_expiry: expiry,
+      otp_code:    otp,
+      otp_expiry:  expiry,
+      otp_purpose: 'reset',
     });
 
-    // Build reset URL — uses the frontend origin sent in request, or falls back to env var
-    const origin   = req.headers.origin || process.env.FRONTEND_URL || 'https://your-frontend.vercel.app';
-    const resetUrl = `${origin}/reset-password.html?token=${token}`;
+    await sendOTPEmail(coach.email, otp, 'reset');
 
-    // In production you would email this link. For now we return it in the response
-    // so you can wire up your email provider (SendGrid, Resend, etc.) without friction.
     res.json({
-      message:  'If that email exists, a reset link has been sent.',
-      resetUrl, // ← remove / hide this once email is wired up
+      message: 'If that email exists, a 6-digit code has been sent.',
+      ...((!process.env.EMAIL_USER) && { devOtp: otp }), // only in dev when email not configured
     });
   } catch (err) {
     console.error(err);
@@ -506,24 +551,25 @@ app.post('/api/coach/forgot-password', async (req, res) => {
   }
 });
 
-// POST /api/coach/reset-password
-app.post('/api/coach/reset-password', async (req, res) => {
+// POST /api/coach/verify-otp-reset  — step 2: verify OTP + set new password
+app.post('/api/coach/verify-otp-reset', async (req, res) => {
   try {
-    const { token, password } = req.body;
-    if (!token || !password) return res.status(400).json({ message: 'Token and new password are required' });
-    if (password.length < 8)  return res.status(400).json({ message: 'Password must be at least 8 characters' });
+    const { email, otp, password } = req.body;
+    if (!email || !otp || !password)
+      return res.status(400).json({ message: 'Email, OTP, and new password are required' });
+    if (password.length < 8)
+      return res.status(400).json({ message: 'Password must be at least 8 characters' });
 
-    const coach = await Coach.findOne({
-      reset_token:        token,
-      reset_token_expiry: { $gt: new Date() },
-    });
-    if (!coach) return res.status(400).json({ message: 'Reset link is invalid or has expired' });
+    const coach = await Coach.findOne({ email: email.toLowerCase().trim() });
+    if (!coach || coach.otp_purpose !== 'reset' || coach.otp_code !== otp || new Date() > coach.otp_expiry)
+      return res.status(400).json({ message: 'OTP is invalid or has expired' });
 
     const hashed = await bcrypt.hash(password, 12);
     await Coach.findByIdAndUpdate(coach._id, {
-      password:           hashed,
-      reset_token:        null,
-      reset_token_expiry: null,
+      password:    hashed,
+      otp_code:    null,
+      otp_expiry:  null,
+      otp_purpose: null,
     });
 
     res.json({ message: 'Password updated successfully. You can now log in.' });
