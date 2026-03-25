@@ -5,6 +5,7 @@ const cors     = require('cors');
 const axios    = require('axios');
 const mongoose = require('mongoose');
 const FormData = require('form-data');
+const crypto   = require('crypto');
 
 // ── ENV VALIDATION ────────────────────────────────────────────────
 const REQUIRED_ENV = ['MONGODB_URI', 'JWT_SECRET', 'GHL_API_KEY', 'GHL_LOCATION_ID'];
@@ -49,7 +50,9 @@ const coachSchema = new mongoose.Schema({
   team_details: { type: String, default: '' },
   assistant1:   { type: mongoose.Schema.Types.Mixed, default: {} },
   assistant2:   { type: mongoose.Schema.Types.Mixed, default: {} },
-  active:       { type: Boolean, default: true },
+  active:             { type: Boolean, default: true },
+  reset_token:        { type: String, default: null },
+  reset_token_expiry: { type: Date,   default: null },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 // Indexes
 coachSchema.index({ email: 1 });
@@ -463,6 +466,67 @@ app.post('/api/coach/login', async (req, res) => {
       token: signToken(coach._id),
       coach: { _id: coach._id, firstName: coach.first_name, lastName: coach.last_name, teamName: coach.team_name }
     });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// POST /api/coach/forgot-password
+app.post('/api/coach/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ message: 'Email is required' });
+
+    const coach = await Coach.findOne({ email: email.toLowerCase().trim() });
+    // Always return success to avoid user enumeration
+    if (!coach) return res.json({ message: 'If that email exists, a reset link has been sent.' });
+
+    const token  = crypto.randomBytes(32).toString('hex');
+    const expiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+    await Coach.findByIdAndUpdate(coach._id, {
+      reset_token:        token,
+      reset_token_expiry: expiry,
+    });
+
+    // Build reset URL — uses the frontend origin sent in request, or falls back to env var
+    const origin   = req.headers.origin || process.env.FRONTEND_URL || 'https://your-frontend.vercel.app';
+    const resetUrl = `${origin}/reset-password.html?token=${token}`;
+
+    // In production you would email this link. For now we return it in the response
+    // so you can wire up your email provider (SendGrid, Resend, etc.) without friction.
+    res.json({
+      message:  'If that email exists, a reset link has been sent.',
+      resetUrl, // ← remove / hide this once email is wired up
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// POST /api/coach/reset-password
+app.post('/api/coach/reset-password', async (req, res) => {
+  try {
+    const { token, password } = req.body;
+    if (!token || !password) return res.status(400).json({ message: 'Token and new password are required' });
+    if (password.length < 8)  return res.status(400).json({ message: 'Password must be at least 8 characters' });
+
+    const coach = await Coach.findOne({
+      reset_token:        token,
+      reset_token_expiry: { $gt: new Date() },
+    });
+    if (!coach) return res.status(400).json({ message: 'Reset link is invalid or has expired' });
+
+    const hashed = await bcrypt.hash(password, 12);
+    await Coach.findByIdAndUpdate(coach._id, {
+      password:           hashed,
+      reset_token:        null,
+      reset_token_expiry: null,
+    });
+
+    res.json({ message: 'Password updated successfully. You can now log in.' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Server error' });
