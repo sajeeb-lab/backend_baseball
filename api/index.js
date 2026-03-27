@@ -246,6 +246,7 @@ const Budget             = mongoose.model('Budget',             budgetSchema);
 const GHL_HEADERS = () => ({
   'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
   'Content-Type':  'application/json',
+  'Accept':        'application/json',
   'Version':       '2021-07-28',
 });
 
@@ -276,58 +277,93 @@ async function uploadImageToGHL(base64, fileName, mimeType) {
 
 // ── GHL PRODUCT + PRICE CREATION ─────────────────────────────
 /**
- * Creates a GHL product and an associated price.
- * @param {string} name         - Product/price display name
- * @param {number} amountCents  - Amount in cents (e.g. $250 → 25000)
- * @param {object|null} recurring - null for one_time, or { interval: 'month', intervalCount: 1 }
+ * Creates a GHL product then a price under it.
+ *
+ * GHL docs confirm:
+ *   - amount is in DOLLARS  (e.g. 250, not 25000)
+ *   - type uses underscore  "one_time" | "recurring"
+ *   - locationId required on BOTH product AND price payloads
+ *
+ * @param {string}      name       - Display name for product and price
+ * @param {number}      amount     - Dollar amount e.g. 250
+ * @param {object|null} recurring  - null = one_time; { interval: 'month', intervalCount: 1 } = recurring
  * @returns {{ productId: string, priceId: string }}
  */
-async function createGHLProductWithPrice(name, amountCents, recurring = null) {
-  // 1. Create the product
-  const productRes = await axios.post(
-    'https://services.leadconnectorhq.com/products/',
-    {
-      locationId:  process.env.GHL_LOCATION_ID,
-      name,
-      productType: 'SERVICE',
-    },
-    { headers: GHL_HEADERS() }
-  );
+async function createGHLProductWithPrice(name, amount, recurring = null) {
+  // ── Step 1: Create product ────────────────────────────────
+  let productId;
+  try {
+    const productRes = await axios.post(
+      'https://services.leadconnectorhq.com/products/',
+      {
+        locationId:  process.env.GHL_LOCATION_ID,
+        name,
+        productType: 'SERVICE',
+      },
+      { headers: GHL_HEADERS() }
+    );
 
-  const productId = productRes.data?._id || productRes.data?.product?._id;
-  if (!productId) {
-    throw new Error(`No product ID returned for "${name}": ` + JSON.stringify(productRes.data));
+    productId = productRes.data?._id
+      || productRes.data?.product?._id
+      || productRes.data?.id;
+
+    if (!productId) {
+      throw new Error('No product ID in response: ' + JSON.stringify(productRes.data));
+    }
+    console.log(`📦  GHL product created: "${name}" → ${productId}`);
+  } catch (err) {
+    const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    throw new Error(`GHL create product failed for "${name}": ${detail}`);
   }
 
-  // 2. Create the price under that product
+  // ── Step 2: Create price ──────────────────────────────────
+  // Matches GHL docs exactly:
+  //   amount  = dollars (99.99, not 9999)
+  //   type    = "one_time" with underscore
+  //   locationId required here too
   const pricePayload = {
+    locationId: process.env.GHL_LOCATION_ID,
     name,
-    amount:   amountCents,
-    currency: 'USD',
-    type:     recurring ? 'recurring' : 'one_time',
+    amount:     Number(amount),               // dollars e.g. 250
+    currency:   'USD',
+    type:       recurring ? 'recurring' : 'one_time',
   };
+
   if (recurring) {
-    pricePayload.recurring = recurring;
+    pricePayload.recurring = {
+      interval:      recurring.interval,      // 'day' | 'week' | 'month' | 'year'
+      intervalCount: recurring.intervalCount, // e.g. 1
+    };
   }
 
-  const priceRes = await axios.post(
-    `https://services.leadconnectorhq.com/products/${productId}/price`,
-    pricePayload,
-    { headers: GHL_HEADERS() }
-  );
+  let priceId;
+  try {
+    const priceRes = await axios.post(
+      `https://services.leadconnectorhq.com/products/${productId}/price`,
+      pricePayload,
+      { headers: GHL_HEADERS() }
+    );
 
-  const priceId = priceRes.data?._id || priceRes.data?.price?._id;
-  if (!priceId) {
-    throw new Error(`No price ID returned for "${name}": ` + JSON.stringify(priceRes.data));
+    priceId = priceRes.data?._id
+      || priceRes.data?.price?._id
+      || priceRes.data?.id;
+
+    if (!priceId) {
+      throw new Error('No price ID in response: ' + JSON.stringify(priceRes.data));
+    }
+    console.log(`💰  GHL price created: "${name}" $${amount} → priceId=${priceId}`);
+  } catch (err) {
+    const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    // Product was created but price failed — log productId for manual cleanup
+    console.error(`❌  GHL price creation failed (orphan productId=${productId}):`, detail);
+    throw new Error(`GHL create price failed for "${name}": ${detail}`);
   }
 
-  console.log(`✅  GHL product created: "${name}" → productId=${productId}, priceId=${priceId}`);
   return { productId, priceId };
 }
 
 /**
- * Deletes a GHL product by ID (best-effort — does not throw on failure).
- * Called when the coach changes their fee so old products are cleaned up.
+ * Deletes a GHL product by ID. Best-effort — never throws.
  */
 async function deleteGHLProduct(productId) {
   if (!productId) return;
@@ -615,7 +651,7 @@ app.post('/api/coach/login', async (req, res) => {
   }
 });
 
-// POST /api/coach/forgot-password  — step 1: send OTP to email
+// POST /api/coach/forgot-password
 app.post('/api/coach/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
@@ -645,7 +681,7 @@ app.post('/api/coach/forgot-password', async (req, res) => {
   }
 });
 
-// POST /api/coach/verify-otp-reset  — step 2: verify OTP + set new password
+// POST /api/coach/verify-otp-reset
 app.post('/api/coach/verify-otp-reset', async (req, res) => {
   try {
     const { email, otp, password } = req.body;
@@ -746,7 +782,6 @@ app.put('/api/coach/update-assistants', requireAuth, async (req, res) => {
   }
 });
 
-// ── IMAGE UPLOAD (GHL Media) ──────────────────────────────────
 // POST /api/coach/upload-image
 app.post('/api/coach/upload-image', requireAuth, async (req, res) => {
   try {
@@ -799,7 +834,6 @@ app.delete('/api/coach/delete-image', requireAuth, async (req, res) => {
 
 // ── TRYOUT ROUTES ─────────────────────────────────────────────
 
-// GET /api/coach/tryouts
 app.get('/api/coach/tryouts', requireAuth, async (req, res) => {
   try {
     const tryouts = await Tryout.find({ coach_id: req.coachId }).sort({ created_at: 1 });
@@ -809,7 +843,6 @@ app.get('/api/coach/tryouts', requireAuth, async (req, res) => {
   }
 });
 
-// POST /api/coach/tryouts
 app.post('/api/coach/tryouts', requireAuth, async (req, res) => {
   try {
     const { date, time, location, fee, city, state } = req.body;
@@ -825,7 +858,6 @@ app.post('/api/coach/tryouts', requireAuth, async (req, res) => {
   }
 });
 
-// PUT /api/coach/tryouts/:tryoutId
 app.put('/api/coach/tryouts/:tryoutId', requireAuth, async (req, res) => {
   try {
     const { date, time, location, fee, city, state } = req.body;
@@ -843,7 +875,6 @@ app.put('/api/coach/tryouts/:tryoutId', requireAuth, async (req, res) => {
   }
 });
 
-// DELETE /api/coach/tryouts/:tryoutId
 app.delete('/api/coach/tryouts/:tryoutId', requireAuth, async (req, res) => {
   try {
     await Tryout.findOneAndDelete({ _id: req.params.tryoutId, coach_id: req.coachId });
@@ -853,7 +884,6 @@ app.delete('/api/coach/tryouts/:tryoutId', requireAuth, async (req, res) => {
   }
 });
 
-// GET /api/coach/tryout-registrations
 app.get('/api/coach/tryout-registrations', requireAuth, async (req, res) => {
   try {
     const data = await TryoutRegistration.find({ coach_id: req.coachId }).sort({ created_at: -1 });
@@ -865,7 +895,6 @@ app.get('/api/coach/tryout-registrations', requireAuth, async (req, res) => {
 
 // ── SCHEDULE ROUTES ───────────────────────────────────────────
 
-// GET /api/coach/schedule
 app.get('/api/coach/schedule', requireAuth, async (req, res) => {
   try {
     const data = await Schedule.find({ coach_id: req.coachId }).sort({ date_sort: 1 });
@@ -875,7 +904,6 @@ app.get('/api/coach/schedule', requireAuth, async (req, res) => {
   }
 });
 
-// POST /api/coach/schedule
 app.post('/api/coach/schedule', requireAuth, async (req, res) => {
   try {
     const { startDate, endDate, event, city, state } = req.body;
@@ -897,7 +925,6 @@ app.post('/api/coach/schedule', requireAuth, async (req, res) => {
   }
 });
 
-// PUT /api/coach/schedule/:gameId
 app.put('/api/coach/schedule/:gameId', requireAuth, async (req, res) => {
   try {
     const { startDate, endDate, event, city, state } = req.body;
@@ -915,7 +942,6 @@ app.put('/api/coach/schedule/:gameId', requireAuth, async (req, res) => {
   }
 });
 
-// DELETE /api/coach/schedule/:gameId
 app.delete('/api/coach/schedule/:gameId', requireAuth, async (req, res) => {
   try {
     await Schedule.findOneAndDelete({ _id: req.params.gameId, coach_id: req.coachId });
@@ -927,7 +953,6 @@ app.delete('/api/coach/schedule/:gameId', requireAuth, async (req, res) => {
 
 // ── FINANCIALS ROUTES ─────────────────────────────────────────
 
-// GET /api/coach/financials
 app.get('/api/coach/financials', requireAuth, async (req, res) => {
   try {
     const data = await TeamFinancials.findOne({ coach_id: req.coachId });
@@ -938,14 +963,15 @@ app.get('/api/coach/financials', requireAuth, async (req, res) => {
 });
 
 // POST /api/coach/financials
-// Creates or updates team financial settings AND syncs GHL products.
+// Creates or updates financial settings and syncs GHL products/prices.
 //
-// Logic:
-//   • First save → creates GHL products for all enabled payment types.
-//   • Re-save with same fee → skips GHL (product IDs already stored).
-//   • Re-save with a DIFFERENT fee → deletes old GHL products, creates new ones.
-//   • Toggling depositEnabled / monthlyPayments ON → creates that product if missing.
-//   • Toggling them OFF → deletes that product from GHL and clears the stored ID.
+// Rules:
+//   • First save            → creates GHL products for all enabled payment types
+//   • Re-save, same fee     → skips GHL (IDs already stored)
+//   • Re-save, changed fee  → deletes old GHL products, creates fresh ones
+//   • Toggle option OFF     → deletes that product, clears stored IDs
+//   • Toggle option ON      → creates that product if missing
+//   • GHL failure           → logs error but always saves to MongoDB
 app.post('/api/coach/financials', requireAuth, async (req, res) => {
   try {
     const {
@@ -958,47 +984,43 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
       installmentMonths,
     } = req.body;
 
-    // ── Fetch the coach's team name for product labels ───────
+    // ── Fetch coach team name for GHL product labels ──────────
     const coach = await Coach.findById(req.coachId).select('team_name');
     const teamLabel = coach?.team_name || 'Team';
 
-    // ── Fetch existing financials record (may be null) ───────
+    // ── Fetch existing record ─────────────────────────────────
     const existing = await TeamFinancials.findOne({ coach_id: req.coachId });
 
-    // ── Derive amounts in cents ───────────────────────────────
-    const fee              = Number(playerFee)    || 0;
-    const deposit          = Number(depositAmount) || 250;
-    const months           = Number(installmentMonths) || 3;
-    const feeCents         = Math.round(fee * 100);
-    const depositCents     = Math.round(deposit * 100);
-    const remainderCents   = Math.max(0, feeCents - depositCents);
-    const installmentCents = months > 0 ? Math.round(feeCents / months) : feeCents;
+    // ── Dollar amounts (GHL wants dollars per their docs) ─────
+    const fee         = Number(playerFee)        || 0;
+    const deposit     = Number(depositAmount)    || 250;
+    const months      = Number(installmentMonths) || 3;
+    const remainder   = Math.max(0, fee - deposit);
+    // Round installment to 2 decimal places
+    const installment = months > 0
+      ? Math.round((fee / months) * 100) / 100
+      : fee;
 
-    // ── Detect whether the fee has changed ───────────────────
-    const feeChanged = existing && existing.player_fee !== fee;
+    // ── Did the player fee change since last save? ────────────
+    const feeChanged = !!existing && existing.player_fee !== fee;
 
-    // ── Build the update object (start with scalar fields) ───
+    // ── Build the MongoDB update object ──────────────────────
     const update = {
       coach_id:           req.coachId,
       player_fee:         fee,
-      payment_deadline:   paymentDeadline   || '',
-      full_pay_only:      fullPayOnly       !== false,
-      deposit_enabled:    depositEnabled    || false,
+      payment_deadline:   paymentDeadline || '',
+      full_pay_only:      fullPayOnly !== false,
+      deposit_enabled:    !!depositEnabled,
       deposit_amount:     deposit,
-      monthly_payments:   monthlyPayments   || false,
+      monthly_payments:   !!monthlyPayments,
       installment_months: months,
     };
 
-    // ── GHL product sync (wrapped so errors don't block save) ─
+    // ── GHL product/price sync ────────────────────────────────
     try {
-      // ── Helper: carry over or clear a product field ────────
-      // If feeChanged we null everything out so it gets recreated below.
-      const carry = (field) => {
-        if (feeChanged) return '';              // fee changed → recreate
-        return existing?.[field] || '';         // same fee → keep existing ID
-      };
+      // carry() returns the stored ID if fee is unchanged, '' if fee changed (forces recreation)
+      const carry = (field) => feeChanged ? '' : (existing?.[field] || '');
 
-      // Seed the update with whatever IDs we're carrying over
       update.ghl_product_full        = carry('ghl_product_full');
       update.ghl_price_full          = carry('ghl_price_full');
       update.ghl_product_deposit     = carry('ghl_product_deposit');
@@ -1010,6 +1032,7 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
 
       // If fee changed, delete all old GHL products first
       if (feeChanged && existing) {
+        console.log('💱  Fee changed — deleting old GHL products and recreating...');
         await Promise.all([
           deleteGHLProduct(existing.ghl_product_full),
           deleteGHLProduct(existing.ghl_product_deposit),
@@ -1018,30 +1041,28 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
         ]);
       }
 
-      // ── Full pay product ───────────────────────────────────
-      // Create if: fee > 0 AND (no existing product OR fee changed)
-      if (feeCents > 0 && !update.ghl_product_full) {
+      // ── Full pay product ──────────────────────────────────
+      if (fee > 0 && !update.ghl_product_full) {
         const { productId, priceId } = await createGHLProductWithPrice(
           `${teamLabel} – Full Payment ($${fee})`,
-          feeCents
+          fee
         );
         update.ghl_product_full = productId;
         update.ghl_price_full   = priceId;
       }
 
-      // ── Deposit product ────────────────────────────────────
-      if (depositEnabled && depositCents > 0) {
+      // ── Deposit product ───────────────────────────────────
+      if (depositEnabled && deposit > 0) {
         if (!update.ghl_product_deposit) {
-          // Create (new or fee changed)
           const { productId, priceId } = await createGHLProductWithPrice(
             `${teamLabel} – Deposit ($${deposit})`,
-            depositCents
+            deposit
           );
           update.ghl_product_deposit = productId;
           update.ghl_price_deposit   = priceId;
         }
       } else {
-        // Deposit toggled OFF → delete if it existed
+        // Deposit toggled OFF — delete if it existed and this isn't a fee-change wipe
         if (existing?.ghl_product_deposit && !feeChanged) {
           await deleteGHLProduct(existing.ghl_product_deposit);
         }
@@ -1049,12 +1070,12 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
         update.ghl_price_deposit   = '';
       }
 
-      // ── Remainder (lump-sum balance after deposit) product ─
-      if (depositEnabled && remainderCents > 0) {
+      // ── Remainder product (balance after deposit) ─────────
+      if (depositEnabled && remainder > 0) {
         if (!update.ghl_product_remainder) {
           const { productId, priceId } = await createGHLProductWithPrice(
-            `${teamLabel} – Remaining Balance ($${fee - deposit})`,
-            remainderCents
+            `${teamLabel} – Remaining Balance ($${remainder})`,
+            remainder
           );
           update.ghl_product_remainder = productId;
           update.ghl_price_remainder   = priceId;
@@ -1067,12 +1088,12 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
         update.ghl_price_remainder   = '';
       }
 
-      // ── Monthly installment product ────────────────────────
-      if (monthlyPayments && installmentCents > 0) {
+      // ── Monthly installment product ───────────────────────
+      if (monthlyPayments && installment > 0) {
         if (!update.ghl_product_installment) {
           const { productId, priceId } = await createGHLProductWithPrice(
-            `${teamLabel} – Monthly Installment ($${Math.round(installmentCents / 100)}/mo × ${months})`,
-            installmentCents,
+            `${teamLabel} – Monthly Installment ($${installment}/mo × ${months})`,
+            installment,
             { interval: 'month', intervalCount: 1 }
           );
           update.ghl_product_installment = productId;
@@ -1087,7 +1108,7 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
       }
 
     } catch (ghlErr) {
-      // GHL errors are non-fatal — log and continue with the local DB save
+      // GHL errors are non-fatal — always fall through to the DB save
       console.error('⚠️  GHL product sync error:', ghlErr.response?.data || ghlErr.message);
     }
 
@@ -1107,7 +1128,6 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
 
 // ── PLAYER PAYMENTS ROUTES ────────────────────────────────────
 
-// GET /api/coach/player-payments
 app.get('/api/coach/player-payments', requireAuth, async (req, res) => {
   try {
     const data = await PlayerPayment.find({ coach_id: req.coachId }).sort({ created_at: -1 });
@@ -1117,7 +1137,6 @@ app.get('/api/coach/player-payments', requireAuth, async (req, res) => {
   }
 });
 
-// POST /api/coach/player-payments (public — called from team page)
 app.post('/api/coach/player-payments', async (req, res) => {
   try {
     const { coachId, playerId, playerName, totalFee, depositAmount,
@@ -1143,7 +1162,6 @@ app.post('/api/coach/player-payments', async (req, res) => {
   }
 });
 
-// PUT /api/coach/player-payments/:paymentId
 app.put('/api/coach/player-payments/:paymentId', async (req, res) => {
   try {
     const { depositPaid, depositPaidDate, paymentPlan, amountPaid, balance, status } = req.body;
@@ -1162,7 +1180,6 @@ app.put('/api/coach/player-payments/:paymentId', async (req, res) => {
   }
 });
 
-// DELETE /api/coach/player-payments/:paymentId
 app.delete('/api/coach/player-payments/:paymentId', requireAuth, async (req, res) => {
   try {
     await PlayerPayment.findOneAndDelete({ _id: req.params.paymentId, coach_id: req.coachId });
@@ -1174,7 +1191,6 @@ app.delete('/api/coach/player-payments/:paymentId', requireAuth, async (req, res
 
 // ── BUDGET ROUTES ─────────────────────────────────────────────
 
-// GET /api/coach/budgets
 app.get('/api/coach/budgets', requireAuth, async (req, res) => {
   try {
     const data = await Budget.find({ coach_id: req.coachId }).sort({ created_at: -1 });
@@ -1184,7 +1200,6 @@ app.get('/api/coach/budgets', requireAuth, async (req, res) => {
   }
 });
 
-// POST /api/coach/budgets
 app.post('/api/coach/budgets', requireAuth, async (req, res) => {
   try {
     const {
@@ -1224,7 +1239,6 @@ app.post('/api/coach/budgets', requireAuth, async (req, res) => {
   }
 });
 
-// PUT /api/coach/budgets/:budgetId
 app.put('/api/coach/budgets/:budgetId', requireAuth, async (req, res) => {
   try {
     const {
@@ -1267,7 +1281,6 @@ app.put('/api/coach/budgets/:budgetId', requireAuth, async (req, res) => {
   }
 });
 
-// DELETE /api/coach/budgets/:budgetId
 app.delete('/api/coach/budgets/:budgetId', requireAuth, async (req, res) => {
   try {
     await Budget.findOneAndDelete({ _id: req.params.budgetId, coach_id: req.coachId });
@@ -1281,7 +1294,6 @@ app.delete('/api/coach/budgets/:budgetId', requireAuth, async (req, res) => {
 //  ADMIN ROUTES
 // ════════════════════════════════════════════════════════════════
 
-// POST /api/admin/login
 app.post('/api/admin/login', (req, res) => {
   const { username, password } = req.body;
   if (username !== (process.env.ADMIN_USERNAME || 'admin') ||
@@ -1291,7 +1303,6 @@ app.post('/api/admin/login', (req, res) => {
   res.json({ token });
 });
 
-// GET /api/admin/coaches
 app.get('/api/admin/coaches', requireAdmin, async (req, res) => {
   try {
     const coaches = await Coach.find().select('-password').sort({ created_at: -1 });
@@ -1300,7 +1311,6 @@ app.get('/api/admin/coaches', requireAdmin, async (req, res) => {
     ]);
     const countMap = {};
     regCounts.forEach(r => { countMap[r._id.toString()] = r.count; });
-
     res.json({ coaches: coaches.map(c => ({
       id:                c._id,
       firstName:         c.first_name,
@@ -1321,7 +1331,6 @@ app.get('/api/admin/coaches', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/admin/coaches/:id
 app.get('/api/admin/coaches/:id', requireAdmin, async (req, res) => {
   try {
     const c = await Coach.findById(req.params.id).select('-password');
@@ -1349,7 +1358,6 @@ app.get('/api/admin/coaches/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/admin/coaches/:id/toggle-active
 app.put('/api/admin/coaches/:id/toggle-active', requireAdmin, async (req, res) => {
   try {
     const { active } = req.body;
@@ -1360,7 +1368,6 @@ app.put('/api/admin/coaches/:id/toggle-active', requireAdmin, async (req, res) =
   }
 });
 
-// PUT /api/admin/coaches/:id/edit
 app.put('/api/admin/coaches/:id/edit', requireAdmin, async (req, res) => {
   try {
     const { firstName, lastName, email, phone, teamName, state, location, ageGroup } = req.body;
@@ -1378,7 +1385,6 @@ app.put('/api/admin/coaches/:id/edit', requireAdmin, async (req, res) => {
 //  PUBLIC ROUTES
 // ════════════════════════════════════════════════════════════════
 
-// GET /api/teams
 app.get('/api/teams', async (req, res) => {
   try {
     const teams = await Coach.find({ active: { $ne: false } })
@@ -1396,7 +1402,6 @@ app.get('/api/teams', async (req, res) => {
   }
 });
 
-// GET /api/teams/:id
 app.get('/api/teams/:id', async (req, res) => {
   try {
     const team = await Coach.findById(req.params.id)
@@ -1408,7 +1413,6 @@ app.get('/api/teams/:id', async (req, res) => {
   }
 });
 
-// GET /api/teams/:id/tryouts
 app.get('/api/teams/:id/tryouts', async (req, res) => {
   try {
     const tryouts = await Tryout.find({ coach_id: req.params.id }).sort({ created_at: 1 });
@@ -1418,7 +1422,6 @@ app.get('/api/teams/:id/tryouts', async (req, res) => {
   }
 });
 
-// GET /api/teams/:id/roster
 app.get('/api/teams/:id/roster', async (req, res) => {
   try {
     const players = await Player.find({ coach_id: req.params.id }).sort({ created_at: 1 });
@@ -1428,7 +1431,6 @@ app.get('/api/teams/:id/roster', async (req, res) => {
   }
 });
 
-// POST /api/teams/:id/roster
 app.post('/api/teams/:id/roster', async (req, res) => {
   try {
     const { name, jersey, gradYear, position, hw, city, state, email, cell } = req.body;
@@ -1452,7 +1454,6 @@ app.post('/api/teams/:id/roster', async (req, res) => {
   }
 });
 
-// PUT /api/teams/:id/roster/:playerId
 app.put('/api/teams/:id/roster/:playerId', requireAuth, async (req, res) => {
   try {
     const { name, jersey, gradYear, position, hw, city, state, email, cell } = req.body;
@@ -1469,7 +1470,6 @@ app.put('/api/teams/:id/roster/:playerId', requireAuth, async (req, res) => {
   }
 });
 
-// DELETE /api/teams/:id/roster/:playerId
 app.delete('/api/teams/:id/roster/:playerId', requireAuth, async (req, res) => {
   try {
     await Player.findOneAndDelete({ _id: req.params.playerId, coach_id: req.params.id });
@@ -1479,7 +1479,6 @@ app.delete('/api/teams/:id/roster/:playerId', requireAuth, async (req, res) => {
   }
 });
 
-// GET /api/teams/:id/schedule
 app.get('/api/teams/:id/schedule', async (req, res) => {
   try {
     const data = await Schedule.find({ coach_id: req.params.id }).sort({ date_sort: 1 });
@@ -1489,7 +1488,6 @@ app.get('/api/teams/:id/schedule', async (req, res) => {
   }
 });
 
-// GET /api/teams/:id/financials
 app.get('/api/teams/:id/financials', async (req, res) => {
   try {
     const data = await TeamFinancials.findOne({ coach_id: req.params.id });
@@ -1499,7 +1497,6 @@ app.get('/api/teams/:id/financials', async (req, res) => {
   }
 });
 
-// POST /api/teams/:id/tryout-registrations
 app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
   try {
     const { completedBy, name, address, city, state, zip, cell, email,
