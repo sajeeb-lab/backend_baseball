@@ -317,22 +317,18 @@ async function createGHLProductWithPrice(name, amount, recurring = null) {
   }
 
   // ── Step 2: Create price ──────────────────────────────────
-  // Matches GHL docs exactly:
-  //   amount  = dollars (99.99, not 9999)
-  //   type    = "one_time" with underscore
-  //   locationId required here too
   const pricePayload = {
     locationId: process.env.GHL_LOCATION_ID,
     name,
-    amount:     Number(amount),               // dollars e.g. 250
+    amount:     Number(amount),
     currency:   'USD',
     type:       recurring ? 'recurring' : 'one_time',
   };
 
   if (recurring) {
     pricePayload.recurring = {
-      interval:      recurring.interval,      // 'day' | 'week' | 'month' | 'year'
-      intervalCount: recurring.intervalCount, // e.g. 1
+      interval:      recurring.interval,
+      intervalCount: recurring.intervalCount,
     };
   }
 
@@ -354,7 +350,6 @@ async function createGHLProductWithPrice(name, amount, recurring = null) {
     console.log(`💰  GHL price created: "${name}" $${amount} → priceId=${priceId}`);
   } catch (err) {
     const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-    // Product was created but price failed — log productId for manual cleanup
     console.error(`❌  GHL price creation failed (orphan productId=${productId}):`, detail);
     throw new Error(`GHL create price failed for "${name}": ${detail}`);
   }
@@ -966,12 +961,12 @@ app.get('/api/coach/financials', requireAuth, async (req, res) => {
 // Creates or updates financial settings and syncs GHL products/prices.
 //
 // Rules:
-//   • First save            → creates GHL products for all enabled payment types
-//   • Re-save, same fee     → skips GHL (IDs already stored)
-//   • Re-save, changed fee  → deletes old GHL products, creates fresh ones
-//   • Toggle option OFF     → deletes that product, clears stored IDs
-//   • Toggle option ON      → creates that product if missing
-//   • GHL failure           → logs error but always saves to MongoDB
+//   • Deposit OFF  → only Full Payment product in GHL
+//   • Deposit ON   → only Deposit + Remaining Balance products in GHL (no Full Payment)
+//   • Monthly payments can exist alongside either of the above
+//   • Fee change   → delete all old GHL products and recreate fresh
+//   • Toggle OFF   → delete that product, clear stored IDs
+//   • GHL failure  → logs error but always saves to MongoDB
 app.post('/api/coach/financials', requireAuth, async (req, res) => {
   try {
     const {
@@ -991,12 +986,11 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
     // ── Fetch existing record ─────────────────────────────────
     const existing = await TeamFinancials.findOne({ coach_id: req.coachId });
 
-    // ── Dollar amounts (GHL wants dollars per their docs) ─────
-    const fee         = Number(playerFee)        || 0;
-    const deposit     = Number(depositAmount)    || 250;
+    // ── Dollar amounts ────────────────────────────────────────
+    const fee         = Number(playerFee)         || 0;
+    const deposit     = Number(depositAmount)     || 250;
     const months      = Number(installmentMonths) || 3;
     const remainder   = Math.max(0, fee - deposit);
-    // Round installment to 2 decimal places
     const installment = months > 0
       ? Math.round((fee / months) * 100) / 100
       : fee;
@@ -1041,17 +1035,26 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
         ]);
       }
 
-      // ── Full pay product ──────────────────────────────────
-      if (fee > 0 && !update.ghl_product_full) {
-        const { productId, priceId } = await createGHLProductWithPrice(
-          `${teamLabel} – Full Payment ($${fee})`,
-          fee
-        );
-        update.ghl_product_full = productId;
-        update.ghl_price_full   = priceId;
+      // ── Full pay product (ONLY when deposit is OFF) ───────
+      if (!depositEnabled) {
+        if (fee > 0 && !update.ghl_product_full) {
+          const { productId, priceId } = await createGHLProductWithPrice(
+            `${teamLabel} – Full Payment ($${fee})`,
+            fee
+          );
+          update.ghl_product_full = productId;
+          update.ghl_price_full   = priceId;
+        }
+      } else {
+        // Deposit is ON — full pay product is not needed; delete if it exists
+        if (existing?.ghl_product_full && !feeChanged) {
+          await deleteGHLProduct(existing.ghl_product_full);
+        }
+        update.ghl_product_full = '';
+        update.ghl_price_full   = '';
       }
 
-      // ── Deposit product ───────────────────────────────────
+      // ── Deposit product (ONLY when deposit is ON) ─────────
       if (depositEnabled && deposit > 0) {
         if (!update.ghl_product_deposit) {
           const { productId, priceId } = await createGHLProductWithPrice(
@@ -1070,7 +1073,7 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
         update.ghl_price_deposit   = '';
       }
 
-      // ── Remainder product (balance after deposit) ─────────
+      // ── Remainder product (balance after deposit, ONLY when deposit is ON) ──
       if (depositEnabled && remainder > 0) {
         if (!update.ghl_product_remainder) {
           const { productId, priceId } = await createGHLProductWithPrice(
