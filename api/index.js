@@ -173,6 +173,19 @@ const teamFinancialsSchema = new mongoose.Schema({
   deposit_enabled:  { type: Boolean, default: false },
   deposit_amount:   { type: Number, default: 250 },
   monthly_payments: { type: Boolean, default: false },
+  installment_months: { type: Number, default: 3 },
+
+  // GHL Product IDs — stored so we can fetch payment links later
+  ghl_product_full:        { type: String, default: '' }, // Full pay product ID
+  ghl_product_deposit:     { type: String, default: '' }, // Deposit product ID
+  ghl_product_remainder:   { type: String, default: '' }, // Remaining lump sum product ID
+  ghl_product_installment: { type: String, default: '' }, // Monthly installment product ID
+
+  // GHL Price IDs (child of product)
+  ghl_price_full:        { type: String, default: '' },
+  ghl_price_deposit:     { type: String, default: '' },
+  ghl_price_remainder:   { type: String, default: '' },
+  ghl_price_installment: { type: String, default: '' },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 const playerPaymentSchema = new mongoose.Schema({
