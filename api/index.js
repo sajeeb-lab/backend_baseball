@@ -7,6 +7,12 @@ const mongoose = require('mongoose');
 const FormData = require('form-data');
 const crypto   = require('crypto');
 const nodemailer = require('nodemailer');
+const Stripe   = require('stripe');
+
+// ── STRIPE INIT ───────────────────────────────────────────────
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? Stripe(process.env.STRIPE_SECRET_KEY)
+  : null;
 
 // ── EMAIL TRANSPORTER ─────────────────────────────────────────
 function createTransporter() {
@@ -69,6 +75,68 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 app.options('*', cors());
+
+// ── STRIPE WEBHOOK — must receive raw body, register BEFORE express.json() ──
+app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  if (!stripe) return res.status(500).json({ message: 'Stripe not configured' });
+
+  const sig = req.headers['stripe-signature'];
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error('⚠️  Stripe webhook signature verification failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const { playerPaymentId, paymentType } = session.metadata || {};
+    const amountPaid = session.amount_total / 100; // cents → dollars
+
+    if (playerPaymentId) {
+      try {
+        const existing = await PlayerPayment.findById(playerPaymentId);
+        if (existing) {
+          const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+          const update = {};
+
+          if (paymentType === 'deposit') {
+            const newAmountPaid = (existing.amount_paid || 0) + amountPaid;
+            const newBalance    = Math.max(0, (existing.total_fee || 0) - newAmountPaid);
+            update.deposit_paid      = true;
+            update.deposit_paid_date = today;
+            update.amount_paid       = newAmountPaid;
+            update.balance           = newBalance;
+            update.status            = newBalance <= 0 ? 'Paid' : 'Partial';
+          } else if (paymentType === 'full' || paymentType === 'remainder') {
+            update.amount_paid = existing.total_fee;
+            update.balance     = 0;
+            update.status      = 'Paid';
+            if (paymentType === 'deposit') {
+              update.deposit_paid      = true;
+              update.deposit_paid_date = today;
+            }
+          } else if (paymentType === 'installment') {
+            const newAmountPaid = (existing.amount_paid || 0) + amountPaid;
+            const newBalance    = Math.max(0, (existing.total_fee || 0) - newAmountPaid);
+            update.amount_paid = newAmountPaid;
+            update.balance     = newBalance;
+            update.status      = newBalance <= 0 ? 'Paid' : 'Partial';
+          }
+
+          await PlayerPayment.findByIdAndUpdate(playerPaymentId, update);
+          console.log(`✅  Stripe payment recorded — playerPaymentId=${playerPaymentId} type=${paymentType}`);
+        }
+      } catch (dbErr) {
+        console.error('❌  Failed to update PlayerPayment after Stripe webhook:', dbErr.message);
+      }
+    }
+  }
+
+  res.json({ received: true });
+});
+
 app.use(express.json({ limit: '10mb' }));
 
 // ── MONGODB CONNECTION ────────────────────────────────────────────
@@ -311,20 +379,6 @@ async function createGHLProductWithPrice(name, amount, recurring = null) {
       throw new Error('No product ID in response: ' + JSON.stringify(productRes.data));
     }
     console.log(`📦  GHL product created: "${name}" → ${productId}`);
-
-    // Wait 4 seconds for GHL to sync this product to Stripe
-    console.log('⏳  Waiting for GHL → Stripe sync...');
-    await new Promise(r => setTimeout(r, 4000));
-
-    // Fetch the product again — by now GHL should have added Stripe product IDs
-    const fetchRes = await axios.get(
-      `https://services.leadconnectorhq.com/products/${productId}`,
-      {
-        headers: GHL_HEADERS(),
-        params: { locationId: process.env.GHL_LOCATION_ID },
-      }
-    );
-    console.log('FULL GHL PRODUCT FETCH RESPONSE:', JSON.stringify(fetchRes.data, null, 2));
   } catch (err) {
     const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
     throw new Error(`GHL create product failed for "${name}": ${detail}`);
@@ -353,9 +407,6 @@ async function createGHLProductWithPrice(name, amount, recurring = null) {
       pricePayload,
       { headers: GHL_HEADERS() }
     );
-
-    // 🔍 LOG FULL PRICE RESPONSE — may also contain Stripe price ID
-    console.log('FULL GHL PRICE RESPONSE:', JSON.stringify(priceRes.data, null, 2));
 
     priceId = priceRes.data?._id
       || priceRes.data?.price?._id
@@ -1142,6 +1193,85 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
     res.json({ message: 'Saved', financials: data });
   } catch (err) {
     console.error(err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ── STRIPE CHECKOUT ───────────────────────────────────────────
+// POST /api/checkout
+// Body: { coachId, paymentType, playerPaymentId, successUrl, cancelUrl }
+// paymentType: 'full' | 'deposit' | 'remainder' | 'installment'
+app.post('/api/checkout', async (req, res) => {
+  if (!stripe) return res.status(500).json({ message: 'Stripe is not configured on the server' });
+
+  try {
+    const { coachId, paymentType, playerPaymentId, successUrl, cancelUrl } = req.body;
+    if (!coachId || !paymentType || !playerPaymentId) {
+      return res.status(400).json({ message: 'coachId, paymentType, and playerPaymentId are required' });
+    }
+
+    // ── Get team financials to build the product name ─────────
+    const financials = await TeamFinancials.findOne({ coach_id: coachId });
+    if (!financials) return res.status(404).json({ message: 'Team financials not found' });
+
+    const coach = await Coach.findById(coachId).select('team_name');
+    const teamLabel = coach?.team_name || 'Team';
+
+    const fee         = financials.player_fee     || 0;
+    const deposit     = financials.deposit_amount || 250;
+    const months      = financials.installment_months || 3;
+    const remainder   = Math.max(0, fee - deposit);
+    const installment = months > 0 ? Math.round((fee / months) * 100) / 100 : fee;
+
+    // ── Map paymentType → exact Stripe product name ───────────
+    const productNameMap = {
+      full:        `${teamLabel} – Full Payment ($${fee})`,
+      deposit:     `${teamLabel} – Deposit ($${deposit})`,
+      remainder:   `${teamLabel} – Remaining Balance ($${remainder})`,
+      installment: `${teamLabel} – Monthly Installment ($${installment}/mo × ${months})`,
+    };
+
+    const productName = productNameMap[paymentType];
+    if (!productName) return res.status(400).json({ message: `Unknown paymentType: ${paymentType}` });
+
+    // ── Search Stripe for the product by exact name ───────────
+    const productSearch = await stripe.products.search({
+      query: `name:"${productName}"`,
+      limit: 1,
+    });
+
+    if (!productSearch.data.length) {
+      return res.status(404).json({ message: `Stripe product not found: "${productName}". It may still be syncing — please try again in a moment.` });
+    }
+
+    const stripeProduct = productSearch.data[0];
+
+    // ── Get the active price for this product ─────────────────
+    const prices = await stripe.prices.list({ product: stripeProduct.id, active: true, limit: 1 });
+    if (!prices.data.length) {
+      return res.status(404).json({ message: `No active price found for Stripe product: "${productName}"` });
+    }
+
+    const priceId = prices.data[0].id;
+
+    // ── Create checkout session ───────────────────────────────
+    const session = await stripe.checkout.sessions.create({
+      mode: paymentType === 'installment' ? 'subscription' : 'payment',
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: successUrl || `${req.headers.origin || 'https://yoursite.com'}?payment=success`,
+      cancel_url:  cancelUrl  || `${req.headers.origin || 'https://yoursite.com'}?payment=cancelled`,
+      metadata: {
+        playerPaymentId,
+        paymentType,
+        coachId,
+      },
+    });
+
+    console.log(`🛒  Stripe checkout created — type=${paymentType} product="${productName}" session=${session.id}`);
+    res.json({ url: session.url });
+
+  } catch (err) {
+    console.error('❌  Stripe checkout error:', err.message);
     res.status(500).json({ message: err.message });
   }
 });
