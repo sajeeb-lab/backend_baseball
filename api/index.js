@@ -303,6 +303,9 @@ async function createGHLProductWithPrice(name, amount, recurring = null) {
       { headers: GHL_HEADERS() }
     );
 
+    // 🔍 LOG FULL RESPONSE — so we can find the Stripe product ID field
+    console.log('FULL GHL PRODUCT RESPONSE:', JSON.stringify(productRes.data, null, 2));
+
     productId = productRes.data?._id
       || productRes.data?.product?._id
       || productRes.data?.id;
@@ -339,6 +342,9 @@ async function createGHLProductWithPrice(name, amount, recurring = null) {
       pricePayload,
       { headers: GHL_HEADERS() }
     );
+
+    // 🔍 LOG FULL PRICE RESPONSE — may also contain Stripe price ID
+    console.log('FULL GHL PRICE RESPONSE:', JSON.stringify(priceRes.data, null, 2));
 
     priceId = priceRes.data?._id
       || priceRes.data?.price?._id
