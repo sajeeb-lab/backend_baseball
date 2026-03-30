@@ -303,9 +303,6 @@ async function createGHLProductWithPrice(name, amount, recurring = null) {
       { headers: GHL_HEADERS() }
     );
 
-    // 🔍 LOG FULL RESPONSE — so we can find the Stripe product ID field
-    console.log('FULL GHL PRODUCT RESPONSE:', JSON.stringify(productRes.data, null, 2));
-
     productId = productRes.data?._id
       || productRes.data?.product?._id
       || productRes.data?.id;
@@ -314,6 +311,17 @@ async function createGHLProductWithPrice(name, amount, recurring = null) {
       throw new Error('No product ID in response: ' + JSON.stringify(productRes.data));
     }
     console.log(`📦  GHL product created: "${name}" → ${productId}`);
+
+    // Wait 4 seconds for GHL to sync this product to Stripe
+    console.log('⏳  Waiting for GHL → Stripe sync...');
+    await new Promise(r => setTimeout(r, 4000));
+
+    // Fetch the product again — by now GHL should have added Stripe product IDs
+    const fetchRes = await axios.get(
+      `https://services.leadconnectorhq.com/products/${productId}`,
+      { headers: GHL_HEADERS() }
+    );
+    console.log('FULL GHL PRODUCT FETCH RESPONSE:', JSON.stringify(fetchRes.data, null, 2));
   } catch (err) {
     const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
     throw new Error(`GHL create product failed for "${name}": ${detail}`);
