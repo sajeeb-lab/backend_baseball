@@ -319,7 +319,10 @@ async function createGHLProductWithPrice(name, amount, recurring = null) {
     // Fetch the product again — by now GHL should have added Stripe product IDs
     const fetchRes = await axios.get(
       `https://services.leadconnectorhq.com/products/${productId}`,
-      { headers: GHL_HEADERS() }
+      {
+        headers: GHL_HEADERS(),
+        params: { locationId: process.env.GHL_LOCATION_ID },
+      }
     );
     console.log('FULL GHL PRODUCT FETCH RESPONSE:', JSON.stringify(fetchRes.data, null, 2));
   } catch (err) {
