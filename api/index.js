@@ -743,7 +743,7 @@ app.post('/api/coach/register', async (req, res) => {
       phone_public: phone,
     });
 
-    upsertGHLCoach({ firstName, lastName, email, phone, teamName });
+    await upsertGHLCoach({ firstName, lastName, email, phone, teamName });
     res.status(201).json({ message: 'Account created successfully' });
   } catch (err) {
     console.error(err);
@@ -871,7 +871,7 @@ app.put('/api/coach/update-profile', requireAuth, async (req, res) => {
     const coach = await Coach.findByIdAndUpdate(req.coachId, update, { new: true }).select('-password');
     if (!coach) return res.status(404).json({ message: 'Coach not found' });
 
-    upsertGHLCoach({
+    await upsertGHLCoach({
       firstName: coach.first_name,
       lastName:  coach.last_name,
       email:     coach.email_public,
@@ -1678,7 +1678,7 @@ app.post('/api/teams/:id/roster', async (req, res) => {
       father_cell:  fatherCell  || '',
       father_email: fatherEmail || '',
     });
-    upsertGHLPlayer({
+    await upsertGHLPlayer({
       name, email, cell, dob, bats, throws, hw,
       jersey, jersey2, gradYear, position, pos2,
       address, city, state, zip, highSchool,
