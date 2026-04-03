@@ -206,16 +206,32 @@ const tryoutRegistrationSchema = new mongoose.Schema({
 tryoutRegistrationSchema.index({ coach_id: 1 });
 
 const playerSchema = new mongoose.Schema({
-  coach_id:  { type: mongoose.Schema.Types.ObjectId, ref: 'Coach', required: true },
-  name:      { type: String, required: true },
-  jersey:    { type: String, default: '' },
-  grad_year: { type: String, default: '' },
-  position:  { type: String, default: '' },
-  hw:        { type: String, default: '' },
-  city:      { type: String, default: '' },
-  state:     { type: String, default: '' },
-  email:     { type: String, default: '' },
-  cell:      { type: String, default: '' },
+  coach_id:         { type: mongoose.Schema.Types.ObjectId, ref: 'Coach', required: true },
+  name:             { type: String, required: true },
+  jersey:           { type: String, default: '' },
+  jersey_2:         { type: String, default: '' },
+  grad_year:        { type: String, default: '' },
+  position:         { type: String, default: '' },
+  pos2:             { type: String, default: '' },
+  hw:               { type: String, default: '' },
+  city:             { type: String, default: '' },
+  state:            { type: String, default: '' },
+  address:          { type: String, default: '' },
+  zip:              { type: String, default: '' },
+  email:            { type: String, default: '' },
+  cell:             { type: String, default: '' },
+  dob:              { type: String, default: '' },
+  bats:             { type: String, default: '' },
+  throws:           { type: String, default: '' },
+  high_school:      { type: String, default: '' },
+  mother_first:     { type: String, default: '' },
+  mother_last:      { type: String, default: '' },
+  mother_cell:      { type: String, default: '' },
+  mother_email:     { type: String, default: '' },
+  father_first:     { type: String, default: '' },
+  father_last:      { type: String, default: '' },
+  father_cell:      { type: String, default: '' },
+  father_email:     { type: String, default: '' },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 playerSchema.index({ coach_id: 1 });
 
@@ -614,16 +630,32 @@ function normalizeTryout(t) {
 
 function normalizePlayer(p) {
   return {
-    _id:      p._id,
-    name:     p.name      || '',
-    jersey:   p.jersey    || '',
-    gradYear: p.grad_year || '',
-    position: p.position  || '',
-    hw:       p.hw        || '',
-    city:     p.city      || '',
-    state:    p.state     || '',
-    email:    p.email     || '',
-    cell:     p.cell      || '',
+    _id:          p._id,
+    name:         p.name         || '',
+    jersey:       p.jersey       || '',
+    jersey2:      p.jersey_2     || '',
+    gradYear:     p.grad_year    || '',
+    position:     p.position     || '',
+    pos2:         p.pos2         || '',
+    hw:           p.hw           || '',
+    city:         p.city         || '',
+    state:        p.state        || '',
+    address:      p.address      || '',
+    zip:          p.zip          || '',
+    email:        p.email        || '',
+    cell:         p.cell         || '',
+    dob:          p.dob          || '',
+    bats:         p.bats         || '',
+    throws:       p.throws       || '',
+    highSchool:   p.high_school  || '',
+    motherFirst:  p.mother_first || '',
+    motherLast:   p.mother_last  || '',
+    motherCell:   p.mother_cell  || '',
+    motherEmail:  p.mother_email || '',
+    fatherFirst:  p.father_first || '',
+    fatherLast:   p.father_last  || '',
+    fatherCell:   p.father_cell  || '',
+    fatherEmail:  p.father_email || '',
   };
 }
 
@@ -1583,19 +1615,40 @@ app.get('/api/teams/:id/roster', async (req, res) => {
 
 app.post('/api/teams/:id/roster', async (req, res) => {
   try {
-    const { name, jersey, gradYear, position, hw, city, state, email, cell } = req.body;
+    const {
+      name, jersey, jersey2, gradYear, position, pos2, hw, city, state,
+      address, zip, email, cell, dob, bats, throws, highSchool,
+      motherFirst, motherLast, motherCell, motherEmail,
+      fatherFirst, fatherLast, fatherCell, fatherEmail,
+    } = req.body;
     if (!name) return res.status(400).json({ message: 'Player name is required' });
     const player = await Player.create({
-      coach_id:  req.params.id,
+      coach_id:     req.params.id,
       name,
-      jersey,
-      grad_year: gradYear,
-      position,
-      hw,
-      city,
-      state,
-      email:     email || '',
-      cell:      cell  || '',
+      jersey:       jersey      || '',
+      jersey_2:     jersey2     || '',
+      grad_year:    gradYear    || '',
+      position:     position    || '',
+      pos2:         pos2        || '',
+      hw:           hw          || '',
+      city:         city        || '',
+      state:        state       || '',
+      address:      address     || '',
+      zip:          zip         || '',
+      email:        email       || '',
+      cell:         cell        || '',
+      dob:          dob         || '',
+      bats:         bats        || '',
+      throws:       throws      || '',
+      high_school:  highSchool  || '',
+      mother_first: motherFirst || '',
+      mother_last:  motherLast  || '',
+      mother_cell:  motherCell  || '',
+      mother_email: motherEmail || '',
+      father_first: fatherFirst || '',
+      father_last:  fatherLast  || '',
+      father_cell:  fatherCell  || '',
+      father_email: fatherEmail || '',
     });
     upsertGHLPlayer({ name, email, cell, city, state, position, jersey, gradYear, hw });
     res.status(201).json({ message: 'Player registered', player: normalizePlayer(player) });
@@ -1606,11 +1659,42 @@ app.post('/api/teams/:id/roster', async (req, res) => {
 
 app.put('/api/teams/:id/roster/:playerId', requireAuth, async (req, res) => {
   try {
-    const { name, jersey, gradYear, position, hw, city, state, email, cell } = req.body;
+    const {
+      name, jersey, jersey2, gradYear, position, pos2, hw, city, state,
+      address, zip, email, cell, dob, bats, throws, highSchool,
+      motherFirst, motherLast, motherCell, motherEmail,
+      fatherFirst, fatherLast, fatherCell, fatherEmail,
+    } = req.body;
     if (!name) return res.status(400).json({ message: 'Player name is required' });
     const player = await Player.findOneAndUpdate(
       { _id: req.params.playerId, coach_id: req.params.id },
-      { name, jersey, grad_year: gradYear, position, hw, city, state, email, cell },
+      {
+        name,
+        jersey:       jersey      || '',
+        jersey_2:     jersey2     || '',
+        grad_year:    gradYear    || '',
+        position:     position    || '',
+        pos2:         pos2        || '',
+        hw:           hw          || '',
+        city:         city        || '',
+        state:        state       || '',
+        address:      address     || '',
+        zip:          zip         || '',
+        email:        email       || '',
+        cell:         cell        || '',
+        dob:          dob         || '',
+        bats:         bats        || '',
+        throws:       throws      || '',
+        high_school:  highSchool  || '',
+        mother_first: motherFirst || '',
+        mother_last:  motherLast  || '',
+        mother_cell:  motherCell  || '',
+        mother_email: motherEmail || '',
+        father_first: fatherFirst || '',
+        father_last:  fatherLast  || '',
+        father_cell:  fatherCell  || '',
+        father_email: fatherEmail || '',
+      },
       { new: true }
     );
     if (!player) return res.status(404).json({ message: 'Player not found' });
