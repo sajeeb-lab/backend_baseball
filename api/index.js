@@ -505,31 +505,58 @@ async function upsertGHLContact({ completedBy, name, address, city, state, zip, 
 }
 
 // ── GHL PLAYER UPSERT ─────────────────────────────────────────
-async function upsertGHLPlayer({ name, email, cell, city, state, position, jersey, gradYear, hw }) {
+async function upsertGHLPlayer({
+  name, email, cell, dob, bats, throws, hw,
+  jersey, jersey2, gradYear, position, pos2,
+  address, city, state, zip, highSchool,
+  motherFirst, motherLast, motherCell, motherEmail,
+  fatherFirst, fatherLast, fatherCell, fatherEmail,
+  teamName,
+}) {
   if (!process.env.GHL_API_KEY || !process.env.GHL_LOCATION_ID) return;
-  const nameParts = (name || '').trim().split(' ');
   try {
     await axios.post(
       'https://services.leadconnectorhq.com/contacts/upsert',
       {
         locationId: process.env.GHL_LOCATION_ID,
-        firstName:  nameParts[0] || '',
-        lastName:   nameParts.slice(1).join(' ') || '',
-        email:  email || '',
-        phone:  cell  || '',
-        city:   city  || '',
-        state:  state || '',
-        tags:   ['Player'],
+        // Contact main identity = Father
+        firstName:  fatherFirst  || '',
+        lastName:   fatherLast   || '',
+        email:      fatherEmail  || '',
+        phone:      fatherCell   || '',
+        // Address = Player's address
+        address1:   address      || '',
+        city:       city         || '',
+        state:      state        || '',
+        postalCode: zip          || '',
+        tags: ['Player'],
         customFields: [
-          { key: 'players_name',  value: name     || '' },
-          { key: 'position',      value: position || '' },
-          { key: 'grad_year',     value: gradYear || '' },
-          { key: 'jersey_number', value: jersey   || '' },
-          { key: 'ht__wt',        value: hw       || '' },
+          // Player info
+          { key: 'players_name',      value: name         || '' },
+          { key: 'player_dob',        value: dob          || '' },
+          { key: 'player_email',      value: email        || '' },
+          { key: 'player_cell',       value: cell         || '' },
+          { key: 'bats',              value: bats         || '' },
+          { key: 'throws',            value: throws       || '' },
+          { key: 'jersey_number_1',   value: jersey       || '' },
+          { key: 'jersey_number_2',   value: jersey2      || '' },
+          { key: 'htwt',              value: hw           || '' },
+          { key: 'grad_year',         value: gradYear     || '' },
+          { key: 'high_school',       value: highSchool   || '' },
+          { key: 'player_address',    value: address      || '' },
+          { key: 'position1',         value: position     || '' },
+          { key: 'position2',         value: pos2         || '' },
+          { key: 'team_name',         value: teamName     || '' },
+          // Mother info
+          { key: 'mother_first_name', value: motherFirst  || '' },
+          { key: 'mother_last_name',  value: motherLast   || '' },
+          { key: 'mother_cell',       value: motherCell   || '' },
+          { key: 'mother_email',      value: motherEmail  || '' },
         ],
       },
       { headers: GHL_HEADERS() }
     );
+    console.log(`✅  GHL player upserted: ${fatherFirst} ${fatherLast} (${fatherEmail})`);
   } catch (err) {
     console.error('GHL player upsert error:', err.response?.data ? JSON.stringify(err.response.data) : err.message);
   }
@@ -1620,6 +1647,7 @@ app.post('/api/teams/:id/roster', async (req, res) => {
       address, zip, email, cell, dob, bats, throws, highSchool,
       motherFirst, motherLast, motherCell, motherEmail,
       fatherFirst, fatherLast, fatherCell, fatherEmail,
+      teamName,
     } = req.body;
     if (!name) return res.status(400).json({ message: 'Player name is required' });
     const player = await Player.create({
@@ -1650,7 +1678,14 @@ app.post('/api/teams/:id/roster', async (req, res) => {
       father_cell:  fatherCell  || '',
       father_email: fatherEmail || '',
     });
-    upsertGHLPlayer({ name, email, cell, city, state, position, jersey, gradYear, hw });
+    upsertGHLPlayer({
+      name, email, cell, dob, bats, throws, hw,
+      jersey, jersey2, gradYear, position, pos2,
+      address, city, state, zip, highSchool,
+      motherFirst, motherLast, motherCell, motherEmail,
+      fatherFirst, fatherLast, fatherCell, fatherEmail,
+      teamName,
+    });
     res.status(201).json({ message: 'Player registered', player: normalizePlayer(player) });
   } catch (err) {
     res.status(500).json({ message: err.message || 'Server error' });
