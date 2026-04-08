@@ -407,7 +407,6 @@ async function createGHLProductWithPrice(name, amount, recurring = null) {
     amount:     Number(amount),
     currency:   'USD',
     type:       recurring ? 'recurring' : 'one_time',
-    active:     true,
   };
 
   if (recurring) {
@@ -1306,51 +1305,10 @@ app.post('/api/checkout', async (req, res) => {
 
     const stripeProduct = productSearch.data[0];
 
-    // ── TEMPORARY DEBUG LOG ───────────────────────────────────
-    const allPricesDebug = await stripe.prices.list({ product: stripeProduct.id, limit: 10 });
-    console.log(`🔍 DEBUG — Product: "${productName}" | Stripe productId: ${stripeProduct.id} | Total prices found: ${allPricesDebug.data.length}`);
-    allPricesDebug.data.forEach(p => {
-      console.log(`   price_id: ${p.id} | amount: $${p.unit_amount/100} | active: ${p.active} | created: ${new Date(p.created * 1000).toISOString()}`);
-    });
-    // ── END DEBUG ─────────────────────────────────────────────
-
-    // ── Map paymentType → amount in cents ────────────────────
-    const amountMap = {
-      full:        Math.round(fee         * 100),
-      deposit:     Math.round(deposit     * 100),
-      remainder:   Math.round(remainder   * 100),
-      installment: Math.round(installment * 100),
-    };
-    const amountCents = amountMap[paymentType] || 0;
-
     // ── Get the active price for this product ─────────────────
-    let prices = await stripe.prices.list({ product: stripeProduct.id, active: true, limit: 1 });
-
+    const prices = await stripe.prices.list({ product: stripeProduct.id, active: true, limit: 1 });
     if (!prices.data.length) {
-      // No active price — check if any price exists (inactive)
-      const allPrices = await stripe.prices.list({ product: stripeProduct.id, limit: 10 });
-
-      if (allPrices.data.length) {
-        // Price exists but inactive — activate it
-        const toActivate = allPrices.data[0];
-        const activated  = await stripe.prices.update(toActivate.id, { active: true });
-        console.log(`✅  Auto-activated Stripe price: ${activated.id} for product: "${productName}"`);
-        prices = { data: [activated] };
-      } else {
-        // No price at all — GHL synced the product but not the price, create it directly in Stripe
-        console.log(`⚠️  No price found in Stripe for "${productName}" — creating directly in Stripe`);
-        const isInstallment = paymentType === 'installment';
-        const newPrice = await stripe.prices.create({
-          product:     stripeProduct.id,
-          unit_amount: amountCents,
-          currency:    'usd',
-          ...(isInstallment ? {
-            recurring: { interval: 'month', interval_count: 1 },
-          } : {}),
-        });
-        console.log(`✅  Stripe price created directly: ${newPrice.id} for product: "${productName}"`);
-        prices = { data: [newPrice] };
-      }
+      return res.status(404).json({ message: `No active price found for Stripe product: "${productName}"` });
     }
 
     const priceId = prices.data[0].id;
