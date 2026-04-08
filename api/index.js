@@ -407,6 +407,7 @@ async function createGHLProductWithPrice(name, amount, recurring = null) {
     amount:     Number(amount),
     currency:   'USD',
     type:       recurring ? 'recurring' : 'one_time',
+    active:     true,
   };
 
   if (recurring) {
@@ -1306,9 +1307,19 @@ app.post('/api/checkout', async (req, res) => {
     const stripeProduct = productSearch.data[0];
 
     // ── Get the active price for this product ─────────────────
-    const prices = await stripe.prices.list({ product: stripeProduct.id, active: true, limit: 1 });
+    let prices = await stripe.prices.list({ product: stripeProduct.id, active: true, limit: 1 });
+
     if (!prices.data.length) {
-      return res.status(404).json({ message: `No active price found for Stripe product: "${productName}"` });
+      // No active price — GHL may have synced it as inactive, try to activate it
+      const allPrices = await stripe.prices.list({ product: stripeProduct.id, limit: 10 });
+      if (!allPrices.data.length) {
+        return res.status(404).json({ message: `No price found for product: "${productName}". Please ask your coach to re-save their financial setup.` });
+      }
+      // Pick the most recently created price and activate it
+      const toActivate = allPrices.data[0];
+      const activated  = await stripe.prices.update(toActivate.id, { active: true });
+      console.log(`✅  Auto-activated Stripe price: ${activated.id} for product: "${productName}"`);
+      prices = { data: [activated] };
     }
 
     const priceId = prices.data[0].id;
