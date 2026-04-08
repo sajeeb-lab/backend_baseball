@@ -1590,6 +1590,18 @@ app.put('/api/admin/coaches/:id/edit', requireAdmin, async (req, res) => {
   }
 });
 
+// GET /api/admin/coaches/:id/token — generate a coach JWT so admin can act as that coach
+app.get('/api/admin/coaches/:id/token', requireAdmin, async (req, res) => {
+  try {
+    const coach = await Coach.findById(req.params.id).select('_id');
+    if (!coach) return res.status(404).json({ message: 'Coach not found' });
+    const token = signToken(coach._id);
+    res.json({ token, coachId: coach._id });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // ════════════════════════════════════════════════════════════════
 //  PUBLIC ROUTES
 // ════════════════════════════════════════════════════════════════
