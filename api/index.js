@@ -162,7 +162,8 @@ const coachSchema = new mongoose.Schema({
   phone_public: { type: String, default: '' },
   bio:          { type: String, default: '' },
   image_url:    { type: String, default: '' },
-  team_details: { type: String, default: '' },
+  team_details:     { type: String,  default: '' },
+  register_enabled: { type: Boolean, default: true },
   assistant1:   { type: mongoose.Schema.Types.Mixed, default: {} },
   assistant2:   { type: mongoose.Schema.Types.Mixed, default: {} },
   active:             { type: Boolean, default: true },
@@ -638,7 +639,8 @@ function normalizeCoach(c) {
     state:       c.state        || '',
     location:    c.location     || '',
     ageGroup:    c.age_group    || '',
-    teamDetails: c.team_details || '',
+    teamDetails:    c.team_details     || '',
+    registerEnabled: c.register_enabled !== false,
     assistant1:  c.assistant1   || {},
     assistant2:  c.assistant2   || {},
   };
@@ -862,6 +864,7 @@ app.put('/api/coach/update-profile', requireAuth, async (req, res) => {
       location:    'location',
       ageGroup:    'age_group',
       teamDetails: 'team_details',
+      registerEnabled: 'register_enabled',
     };
     const update = {};
     Object.entries(map).forEach(([jsKey, dbKey]) => {
@@ -1668,7 +1671,7 @@ app.get('/api/teams', async (req, res) => {
 app.get('/api/teams/:id', async (req, res) => {
   try {
     const team = await Coach.findById(req.params.id)
-      .select('first_name last_name email_public phone_public bio image_url team_name state location age_group team_details assistant1 assistant2');
+      .select('first_name last_name email_public phone_public bio image_url team_name state location age_group team_details register_enabled assistant1 assistant2');
     if (!team) return res.status(404).json({ message: 'Team not found' });
     res.json({ team: normalizeCoach(team) });
   } catch (err) {
