@@ -60,8 +60,55 @@ function generateOTP() {
   return String(Math.floor(100000 + crypto.randomInt(900000))).padStart(6, '0');
 }
 
+// ── PAYMENT NOTIFICATION EMAIL ────────────────────────────────
+async function sendPaymentNotificationEmail({ playerName, paymentType, amountPaid, totalFee, balance, status, playerEmail, playerCell, coachName, teamName }) {
+  const notifyEmail = 'sajeeb@appsus.io';
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    console.warn('⚠️  EMAIL_USER / EMAIL_PASS not set — skipping payment notification email');
+    return;
+  }
+
+  const fmt = n => '$' + (parseFloat(n) || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const typeLabel = { full: 'Full Payment', deposit: 'Deposit', remainder: 'Remaining Balance', installment: 'Installment' }[paymentType] || paymentType;
+
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;border:1px solid #dce3ec;border-radius:8px">
+      <div style="background:#0a1628;padding:16px 20px;border-radius:6px 6px 0 0;margin:-24px -24px 24px">
+        <h2 style="color:#fff;margin:0;font-size:1.1rem;letter-spacing:.05em;text-transform:uppercase">Ambassadors Baseball — Payment Received</h2>
+      </div>
+      <p style="color:#1a1a2e;font-size:.95rem;margin-bottom:20px">A payment has been successfully processed.</p>
+      <table style="width:100%;border-collapse:collapse;font-size:.9rem;margin-bottom:20px">
+        <tr style="background:#f4f6f9"><td style="padding:9px 12px;color:#5a6a7a;width:40%">Player Name</td><td style="padding:9px 12px;color:#0a1628;font-weight:700">${playerName || '—'}</td></tr>
+        <tr><td style="padding:9px 12px;color:#5a6a7a">Team</td><td style="padding:9px 12px;color:#0a1628">${teamName || '—'}</td></tr>
+        <tr style="background:#f4f6f9"><td style="padding:9px 12px;color:#5a6a7a">Coach</td><td style="padding:9px 12px;color:#0a1628">${coachName || '—'}</td></tr>
+        <tr><td style="padding:9px 12px;color:#5a6a7a">Player Email</td><td style="padding:9px 12px;color:#0a1628">${playerEmail || '—'}</td></tr>
+        <tr style="background:#f4f6f9"><td style="padding:9px 12px;color:#5a6a7a">Player Cell</td><td style="padding:9px 12px;color:#0a1628">${playerCell || '—'}</td></tr>
+        <tr><td style="padding:9px 12px;color:#5a6a7a">Payment Type</td><td style="padding:9px 12px;color:#0a1628">${typeLabel}</td></tr>
+        <tr style="background:#f4f6f9"><td style="padding:9px 12px;color:#5a6a7a">Amount Paid</td><td style="padding:9px 12px;color:#2d7a2d;font-weight:700">${fmt(amountPaid)}</td></tr>
+        <tr><td style="padding:9px 12px;color:#5a6a7a">Total Fee</td><td style="padding:9px 12px;color:#0a1628">${fmt(totalFee)}</td></tr>
+        <tr style="background:#f4f6f9"><td style="padding:9px 12px;color:#5a6a7a">Remaining Balance</td><td style="padding:9px 12px;color:${parseFloat(balance) > 0 ? '#c8102e' : '#2d7a2d'};font-weight:700">${fmt(balance)}</td></tr>
+        <tr><td style="padding:9px 12px;color:#5a6a7a">Status</td><td style="padding:9px 12px;color:#0a1628;font-weight:700">${status || '—'}</td></tr>
+      </table>
+      <p style="color:#5a6a7a;font-size:.8rem;margin:0">This is an automated notification from Ambassadors Baseball.</p>
+    </div>`;
+
+  try {
+    await createTransporter().sendMail({
+      from: `"Ambassadors Baseball" <${process.env.EMAIL_USER}>`,
+      to: notifyEmail,
+      subject: `Payment Received — ${playerName || 'Player'} (${typeLabel})`,
+      html,
+    });
+    console.log(`📧  Payment notification email sent to ${notifyEmail}`);
+  } catch (err) {
+    console.error('⚠️  Failed to send payment notification email:', err.message);
+  }
+}
+
 // ── ENV VALIDATION ────────────────────────────────────────────────
-const REQUIRED_ENV = ['MONGODB_URI', 'JWT_SECRET', 'GHL_API_KEY', 'GHL_LOCATION_ID'];
+const REQUIRED_ENV = ['MONGODB_URI', 'JWT_SECRET'];
+// GHL_API_KEY / GHL_LOCATION_ID are optional — used only for contact upserts
+// STRIPE_SECRET_KEY is optional — needed for checkout but not fatal at startup
 const missingEnv = REQUIRED_ENV.filter(k => !process.env[k]);
 if (missingEnv.length) {
   console.error('❌  Missing required environment variables:', missingEnv.join(', '));
@@ -91,8 +138,23 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
-    const { playerPaymentId, paymentType } = session.metadata || {};
+    const { playerPaymentId, paymentType, coachId } = session.metadata || {};
     const amountPaid = session.amount_total / 100; // cents → dollars
+
+    // ── Installment subscription: set cancel_at_period_end as a safety net ─
+    // We primarily cancel via totalMonths count in invoice.payment_succeeded.
+    // cancel_at_period_end is a backup in case the final webhook is missed —
+    // it cancels cleanly at the end of the last billing period, no proration.
+    if (paymentType === 'installment' && session.subscription && stripe) {
+      try {
+        const totalMonths = parseInt(session.metadata?.totalMonths || '0', 10);
+        if (totalMonths > 0) {
+          console.log(`📅  Subscription ${session.subscription} will auto-cancel after ${totalMonths} payments`);
+        }
+      } catch (subErr) {
+        console.error('⚠️  Failed to log installment setup:', subErr.message);
+      }
+    }
 
     if (playerPaymentId) {
       try {
@@ -127,9 +189,226 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 
           await PlayerPayment.findByIdAndUpdate(playerPaymentId, update);
           console.log(`✅  Stripe payment recorded — playerPaymentId=${playerPaymentId} type=${paymentType}`);
+
         }
       } catch (dbErr) {
         console.error('❌  Failed to update PlayerPayment after Stripe webhook:', dbErr.message);
+      }
+    }
+
+    // ── Tryout payment confirmed ──────────────────────────────────────────────
+    if (paymentType === 'tryout') {
+      const { registrationId } = session.metadata || {};
+      if (registrationId) {
+        try {
+          await TryoutRegistration.findByIdAndUpdate(registrationId, { status: 'confirmed' });
+          console.log(`✅  Tryout registration confirmed — registrationId=${registrationId}`);
+        } catch (dbErr) {
+          console.error('❌  Failed to confirm tryout registration:', dbErr.message);
+        }
+      }
+    }
+  }
+
+  // ── Monthly installment payment succeeded ─────────────────────────────────
+  // Handles both old API (invoice.payment_succeeded) and new API (invoice_payment.paid)
+  // invoice_payment.paid was introduced in Stripe API version 2026-02-25
+  if (event.type === 'invoice.payment_succeeded' || event.type === 'invoice_payment.paid') {
+    const isNewFormat = event.type === 'invoice_payment.paid';
+    const rawObj      = event.data.object;
+
+    // invoice_payment.paid has a different shape — fetch the parent invoice
+    // to get billing_reason and subscription ID
+    let invoice;
+    if (isNewFormat) {
+      try {
+        invoice = await stripe.invoices.retrieve(rawObj.invoice);
+        console.log(`🔔  invoice_payment.paid — invoice=${rawObj.invoice} amount=${rawObj.amount_paid} billing_reason=${invoice.billing_reason} sub=${invoice.subscription}`);
+      } catch (fetchErr) {
+        console.error('❌  Could not fetch invoice for invoice_payment.paid:', fetchErr.message);
+        return res.json({ received: true });
+      }
+    } else {
+      invoice = rawObj;
+      console.log(`🔔  invoice.payment_succeeded — billing_reason=${invoice.billing_reason} amount=${invoice.amount_paid} sub=${invoice.subscription}`);
+    }
+
+    // ── Extract subscription ID — location changed in Stripe API 2026-02-25 ──
+    // Old API: invoice.subscription
+    // New API: invoice.parent.subscription_details.subscription
+    const subId = invoice.subscription
+      || invoice?.parent?.subscription_details?.subscription
+      || invoice?.parent?.subscription
+      || null;
+
+    console.log(`🔍  Resolved subId=${subId} (from invoice.subscription=${invoice.subscription} parent=${JSON.stringify(invoice.parent || null)})`);
+
+    if (invoice.billing_reason === 'subscription_create') {
+      console.log(`⏭️  Skipping — first charge already handled by checkout.session.completed`);
+    } else {
+      if (!subId) {
+        console.error('❌  No subscription ID on invoice — cannot process');
+      } else if (!stripe) {
+        console.error('❌  Stripe not initialised');
+      } else {
+        try {
+          const subscription = await stripe.subscriptions.retrieve(subId);
+          console.log(`📋  Subscription metadata:`, JSON.stringify(subscription.metadata));
+
+          const { playerPaymentId } = subscription.metadata || {};
+          const totalMonths  = parseInt(subscription.metadata?.totalMonths || '0', 10);
+          const amountPaid   = invoice.amount_paid / 100;
+
+          if (!playerPaymentId) {
+            console.error(`❌  No playerPaymentId in subscription metadata for ${subId} — cannot update DB`);
+          } else if (amountPaid <= 0) {
+            console.warn(`⚠️  amountPaid is ${amountPaid} — skipping`);
+          } else {
+            console.log(`🔎  Looking up PlayerPayment: ${playerPaymentId}`);
+            const existing = await PlayerPayment.findById(playerPaymentId);
+
+            if (!existing) {
+              console.error(`❌  PlayerPayment ${playerPaymentId} not found in DB`);
+            } else {
+              console.log(`📊  Current record — total_fee=${existing.total_fee} amount_paid=${existing.amount_paid} balance=${existing.balance} status=${existing.status} installments_paid=${existing.installments_paid||0}/${totalMonths}`);
+
+              const totalFee         = existing.total_fee || 0;
+              const paidSoFar        = existing.amount_paid || 0;
+              const installmentsPaid = (existing.installments_paid || 0) + 1;
+
+              // ── Determine if this is the final payment ────────────────────
+              // We use the totalMonths count stored in subscription metadata.
+              // This is more reliable than comparing dollar amounts because
+              // integer division always leaves a fractional cent gap that would
+              // cause the last invoice to show a prorated/partial amount.
+              // When it IS the last payment we zero the balance exactly —
+              // the player is fully settled regardless of cent-level rounding.
+              const isLastPayment = totalMonths > 0 && installmentsPaid >= totalMonths;
+
+              let newAmountPaid, newBalance;
+              if (isLastPayment) {
+                // Last payment by count — zero out exactly regardless of rounding
+                newAmountPaid = totalFee;
+                newBalance    = 0;
+                console.log(`🏁  Final installment ${installmentsPaid}/${totalMonths} — zeroing balance exactly`);
+              } else {
+                newAmountPaid = Math.min(paidSoFar + amountPaid, totalFee);
+                newBalance    = Math.max(0, totalFee - newAmountPaid);
+
+                // Penny tolerance — catches rounding gaps like $0.01 from
+                // $1000/3 = $999.99 when totalMonths is 0 (old subscriptions
+                // created before totalMonths metadata was added).
+                // If balance is $0.50 or less after payment, treat as fully paid.
+                if (newBalance > 0 && newBalance <= 0.50) {
+                  console.log(`🪙  Balance ${newBalance} within penny tolerance — zeroing out`);
+                  newAmountPaid = totalFee;
+                  newBalance    = 0;
+                }
+              }
+
+              const newStatus = newBalance <= 0 ? 'Paid' : 'Partial';
+              console.log(`💾  Updating — installment=${installmentsPaid}/${totalMonths} isLast=${isLastPayment} newAmountPaid=${newAmountPaid} newBalance=${newBalance} newStatus=${newStatus}`);
+
+              await PlayerPayment.findByIdAndUpdate(playerPaymentId, {
+                amount_paid:       newAmountPaid,
+                balance:           newBalance,
+                status:            newStatus,
+                installments_paid: installmentsPaid,
+              });
+              console.log(`✅  DB updated successfully — playerPaymentId=${playerPaymentId}`);
+
+
+              // ── Handle second-to-last and last payment ────────────────
+              // The problem: if the last billing cycle is shorter than 30 days
+              // (e.g. registered July 10, deadline Sept 30 — last cycle is
+              // Sept 10 → Sept 30 = 20 days), Stripe prorates and charges less.
+              //
+              // Solution: after the SECOND-TO-LAST payment, cancel the subscription
+              // immediately and create a one-time invoice for the exact remaining
+              // balance. This guarantees the full amount is always collected
+              // regardless of how many days are left in the final cycle.
+              const isSecondToLast = totalMonths > 1 && installmentsPaid === totalMonths - 1;
+
+              if (isLastPayment || newBalance <= 0) {
+                // All done — cancel subscription cleanly
+                console.log(`🎉  All payments complete — cancelling subscription ${subId}`);
+                try {
+                  await stripe.subscriptions.cancel(subId);
+                  console.log(`✅  Subscription ${subId} cancelled — fully paid`);
+                } catch (cancelErr) {
+                  console.error(`⚠️  Could not cancel subscription ${subId}:`, cancelErr.message);
+                }
+
+              } else if (isSecondToLast && stripe) {
+                // Second-to-last payment just completed.
+                // Cancel the subscription NOW and immediately invoice the exact
+                // remaining balance as a one-time charge — this avoids any
+                // proration on the final cycle.
+                console.log(`⏭️  Second-to-last payment done — cancelling subscription and invoicing remaining balance ${newBalance}`);
+                try {
+                  // 1. Get the customer ID from the subscription
+                  const sub        = await stripe.subscriptions.retrieve(subId);
+                  const customerId = sub.customer;
+
+                  // 2. Cancel the subscription immediately (no more auto-charges)
+                  await stripe.subscriptions.cancel(subId);
+                  console.log(`🚫  Subscription ${subId} cancelled after ${installmentsPaid} payments`);
+
+                  // 3. Create a one-time invoice for the exact remaining balance
+                  const remainingCents = Math.round(newBalance * 100);
+                  const invoiceItem = await stripe.invoiceItems.create({
+                    customer:    customerId,
+                    amount:      remainingCents,
+                    currency:    'usd',
+                    description: `Final installment — remaining balance`,
+                    metadata:    { playerPaymentId, subId },
+                  });
+
+                  const finalInvoice = await stripe.invoices.create({
+                    customer:          customerId,
+                    auto_advance:      true, // automatically charge the card on file
+                    collection_method: 'charge_automatically',
+                    metadata:          { playerPaymentId, paymentType: 'installment_final', coachId: subscription.metadata?.coachId || '' },
+                  });
+
+                  await stripe.invoices.finalizeInvoice(finalInvoice.id);
+                  await stripe.invoices.pay(finalInvoice.id);
+                  console.log(`💳  Final invoice ${finalInvoice.id} created and charged — ${newBalance}`);
+
+                } catch (finalErr) {
+                  console.error(`❌  Failed to create final invoice:`, finalErr.message);
+                  // Subscription is already cancelled at this point.
+                  // The player will need to pay the remaining balance manually.
+                }
+              }
+            }
+          }
+        } catch (err) {
+          console.error('❌  Failed to process invoice.payment_succeeded:', err.message);
+          console.error(err.stack);
+        }
+      }
+    }
+  }
+
+  // ── Subscription cancelled (user cancelled or Stripe auto-cancelled at deadline) ──
+  if (event.type === 'customer.subscription.deleted') {
+    const subscription = event.data.object;
+    const { playerPaymentId } = subscription.metadata || {};
+
+    if (playerPaymentId) {
+      try {
+        const existing = await PlayerPayment.findById(playerPaymentId);
+        if (existing && existing.status !== 'Paid') {
+          const balance = Math.max(0, (existing.total_fee || 0) - (existing.amount_paid || 0));
+          // Only mark Cancelled if there's still an outstanding balance.
+          // If balance is 0 the subscription ended naturally after all payments — leave as Paid.
+          const status = balance > 0 ? 'Cancelled' : 'Paid';
+          await PlayerPayment.findByIdAndUpdate(playerPaymentId, { status, balance });
+          console.log(`🚫  Subscription ${subscription.id} ended — playerPaymentId=${playerPaymentId} status=${status} balance=${balance}`);
+        }
+      } catch (err) {
+        console.error('❌  Failed to update PlayerPayment on subscription cancel:', err.message);
       }
     }
   }
@@ -176,13 +455,15 @@ const coachSchema = new mongoose.Schema({
 coachSchema.index({ active: 1 });
 
 const tryoutSchema = new mongoose.Schema({
-  coach_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Coach', required: true },
-  date:     { type: String, default: '' },
-  time:     { type: String, default: '' },
-  location: { type: String, default: '' },
-  fee:      { type: String, default: 'Free' },
-  city:     { type: String, default: '' },
-  state:    { type: String, default: '' },
+  coach_id:          { type: mongoose.Schema.Types.ObjectId, ref: 'Coach', required: true },
+  date:              { type: String, default: '' },
+  time:              { type: String, default: '' },
+  location:          { type: String, default: '' },
+  fee:               { type: String, default: 'Free' },
+  city:              { type: String, default: '' },
+  state:             { type: String, default: '' },
+  stripe_product_id: { type: String, default: '' },
+  stripe_price_id:   { type: String, default: '' },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 tryoutSchema.index({ coach_id: 1 });
 
@@ -203,6 +484,7 @@ const tryoutRegistrationSchema = new mongoose.Schema({
   pos1:         { type: String, default: '' },
   pos2:         { type: String, default: '' },
   tryout_date:  { type: String, default: '' },
+  status:       { type: String, default: 'confirmed' }, // 'confirmed' | 'pending_payment'
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 tryoutRegistrationSchema.index({ coach_id: 1 });
 
@@ -259,15 +541,15 @@ const teamFinancialsSchema = new mongoose.Schema({
   monthly_payments:   { type: Boolean, default: false },
   installment_months: { type: Number, default: 3 },
 
-  ghl_product_full:        { type: String, default: '' },
-  ghl_product_deposit:     { type: String, default: '' },
-  ghl_product_remainder:   { type: String, default: '' },
-  ghl_product_installment: { type: String, default: '' },
+  stripe_product_full:        { type: String, default: '' },
+  stripe_product_deposit:     { type: String, default: '' },
+  stripe_product_remainder:   { type: String, default: '' },
+  stripe_product_installment: { type: String, default: '' },
 
-  ghl_price_full:        { type: String, default: '' },
-  ghl_price_deposit:     { type: String, default: '' },
-  ghl_price_remainder:   { type: String, default: '' },
-  ghl_price_installment: { type: String, default: '' },
+  stripe_price_full:        { type: String, default: '' },
+  stripe_price_deposit:     { type: String, default: '' },
+  stripe_price_remainder:   { type: String, default: '' },
+  stripe_price_installment: { type: String, default: '' },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 const playerPaymentSchema = new mongoose.Schema({
@@ -284,6 +566,7 @@ const playerPaymentSchema = new mongoose.Schema({
   status:            { type: String, default: 'Pending' },
   registered_date:   { type: String, default: '' },
   payment_deadline:  { type: String, default: '' },
+  installments_paid: { type: Number, default: 0 }, // tracks how many monthly charges have fired
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 playerPaymentSchema.index({ coach_id: 1 });
 
@@ -311,6 +594,7 @@ const budgetSchema = new mongoose.Schema({
   others:       { type: mongoose.Schema.Types.Mixed, default: [] },
   total:        { type: Number, default: 0 },
   per_player:   { type: Number, default: 0 },
+  status:       { type: String, default: 'draft' },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 budgetSchema.index({ coach_id: 1 });
 
@@ -360,106 +644,100 @@ async function uploadImageToGHL(base64, fileName, mimeType) {
   return url;
 }
 
-// ── GHL PRODUCT + PRICE CREATION ─────────────────────────────
+// ── STRIPE PRODUCT + PRICE CREATION ──────────────────────────
 /**
- * Creates a GHL product then a price under it.
+ * Creates a Stripe product and a price under it directly.
  *
- * GHL docs confirm:
- *   - amount is in DOLLARS  (e.g. 250, not 25000)
- *   - type uses underscore  "one_time" | "recurring"
- *   - locationId required on BOTH product AND price payloads
- *
- * @param {string}      name       - Display name for product and price
- * @param {number}      amount     - Dollar amount e.g. 250
+ * @param {string}      name       - Display name (e.g. "Team – Full Payment ($2000)")
+ * @param {number}      amount     - Dollar amount e.g. 250 (converted to cents internally)
  * @param {object|null} recurring  - null = one_time; { interval: 'month', intervalCount: 1 } = recurring
  * @returns {{ productId: string, priceId: string }}
  */
-async function createGHLProductWithPrice(name, amount, recurring = null) {
+async function createStripeProductWithPrice(name, amount, recurring = null) {
+  if (!stripe) throw new Error('Stripe is not configured — set STRIPE_SECRET_KEY env var');
+
   // ── Step 1: Create product ────────────────────────────────
-  let productId;
-  try {
-    const productRes = await axios.post(
-      'https://services.leadconnectorhq.com/products/',
-      {
-        locationId:  process.env.GHL_LOCATION_ID,
-        name,
-        productType: 'SERVICE',
-      },
-      { headers: GHL_HEADERS() }
-    );
-
-    productId = productRes.data?._id
-      || productRes.data?.product?._id
-      || productRes.data?.id;
-
-    if (!productId) {
-      throw new Error('No product ID in response: ' + JSON.stringify(productRes.data));
-    }
-    console.log(`📦  GHL product created: "${name}" → ${productId}`);
-  } catch (err) {
-    const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-    throw new Error(`GHL create product failed for "${name}": ${detail}`);
-  }
+  const product = await stripe.products.create({ name });
+  const productId = product.id;
+  console.log(`📦  Stripe product created: "${name}" → productId=${productId}`);
 
   // ── Step 2: Create price ──────────────────────────────────
-  const pricePayload = {
-    locationId: process.env.GHL_LOCATION_ID,
-    name,
-    amount:     Number(amount),
-    currency:   'USD',
-    type:       recurring ? 'recurring' : 'one_time',
-    active:     true,
+  const priceParams = {
+    product:     productId,
+    unit_amount: Math.round(amount * 100), // dollars → cents
+    currency:    'usd',
   };
-
   if (recurring) {
-    pricePayload.recurring = {
-      interval:      recurring.interval,
-      intervalCount: recurring.intervalCount,
+    priceParams.recurring = {
+      interval:       recurring.interval,
+      interval_count: recurring.intervalCount || 1,
     };
   }
 
-  let priceId;
-  try {
-    const priceRes = await axios.post(
-      `https://services.leadconnectorhq.com/products/${productId}/price`,
-      pricePayload,
-      { headers: GHL_HEADERS() }
-    );
-
-    priceId = priceRes.data?._id
-      || priceRes.data?.price?._id
-      || priceRes.data?.id;
-
-    if (!priceId) {
-      throw new Error('No price ID in response: ' + JSON.stringify(priceRes.data));
-    }
-    console.log(`💰  GHL price created: "${name}" $${amount} → priceId=${priceId}`);
-  } catch (err) {
-    const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-    console.error(`❌  GHL price creation failed (orphan productId=${productId}):`, detail);
-    throw new Error(`GHL create price failed for "${name}": ${detail}`);
-  }
+  const price = await stripe.prices.create(priceParams);
+  const priceId = price.id;
+  console.log(`💰  Stripe price created: "${name}" $${amount} → priceId=${priceId}`);
 
   return { productId, priceId };
 }
 
 /**
- * Deletes a GHL product by ID. Best-effort — never throws.
+ * Archives a Stripe product (and its prices) by ID. Best-effort — never throws.
+ * Stripe does not allow hard-deleting products that have prices, so we archive instead.
  */
-async function deleteGHLProduct(productId) {
-  if (!productId) return;
+async function deleteStripeProduct(productId) {
+  if (!productId || !stripe) return;
   try {
-    await axios.delete(
-      `https://services.leadconnectorhq.com/products/${productId}`,
-      { headers: GHL_HEADERS() }
-    );
-    console.log(`🗑️  GHL product deleted: ${productId}`);
+    // Deactivate all active prices first
+    const prices = await stripe.prices.list({ product: productId, active: true, limit: 100 });
+    await Promise.all(prices.data.map(p => stripe.prices.update(p.id, { active: false })));
+    // Archive the product itself
+    await stripe.products.update(productId, { active: false });
+    console.log(`🗑️  Stripe product archived: ${productId}`);
   } catch (err) {
-    console.warn(`⚠️  Could not delete GHL product ${productId}:`, err.response?.data || err.message);
+    console.warn(`⚠️  Could not archive Stripe product ${productId}:`, err.message);
   }
 }
 
-// ── GHL CONTACT UPSERT (tryout registration) ──────────────────
+/**
+ * Updates the price on an existing Stripe product when only the fee changes.
+ * Deactivates the old price, creates a new price under the same product,
+ * sets the new price as default on the product, and returns the new priceId.
+ * Product ID stays the same — no archiving or recreation.
+ *
+ * @param {string}      productId  - Existing Stripe product ID to update
+ * @param {number}      amount     - New dollar amount
+ * @param {object|null} recurring  - null = one_time; recurring object = subscription
+ * @returns {string} new priceId
+ */
+async function updateStripeProductPrice(productId, amount, recurring = null) {
+  if (!productId || !stripe) throw new Error('Stripe not configured or missing productId');
+
+  // Step 1 — Deactivate all existing active prices on this product
+  const existing = await stripe.prices.list({ product: productId, active: true, limit: 100 });
+  await Promise.all(existing.data.map(p => stripe.prices.update(p.id, { active: false })));
+
+  // Step 2 — Create new price under the same product
+  const priceParams = {
+    product:     productId,
+    unit_amount: Math.round(amount * 100),
+    currency:    'usd',
+  };
+  if (recurring) {
+    priceParams.recurring = {
+      interval:       recurring.interval,
+      interval_count: recurring.intervalCount || 1,
+    };
+  }
+  const newPrice = await stripe.prices.create(priceParams);
+
+  // Step 3 — Set new price as default on the product
+  await stripe.products.update(productId, { default_price: newPrice.id });
+
+  console.log(`💰  Stripe price updated on product ${productId} → new priceId=${newPrice.id} $${amount}`);
+  return newPrice.id;
+}
+  // ── GHL CONTACT UPSERT (tryout registration) ──────────────────
 async function upsertGHLContact({ completedBy, name, address, city, state, zip, cell, email,
                                    playerName, age, dob, hw, pos1, pos2, tryoutDate }) {
   if (!process.env.GHL_API_KEY || !process.env.GHL_LOCATION_ID) {
@@ -648,13 +926,15 @@ function normalizeCoach(c) {
 
 function normalizeTryout(t) {
   return {
-    _id:      t._id,
-    date:     t.date     || '',
-    time:     t.time     || '',
-    location: t.location || '',
-    fee:      t.fee      || 'Free',
-    city:     t.city     || '',
-    state:    t.state    || '',
+    _id:             t._id,
+    date:            t.date             || '',
+    time:            t.time             || '',
+    location:        t.location         || '',
+    fee:             t.fee              || 'Free',
+    city:            t.city             || '',
+    state:           t.state            || '',
+    stripeProductId: t.stripe_product_id || '',
+    stripePriceId:   t.stripe_price_id   || '',
   };
 }
 
@@ -978,6 +1258,32 @@ app.post('/api/coach/tryouts', requireAuth, async (req, res) => {
       coach_id: req.coachId, date, time, location, fee,
       city: city || '', state: state || '',
     });
+
+    // ── Stripe product creation for paid tryouts ──────────────
+    const feeAmount = parseFloat((fee || '').replace('$', ''));
+    if (stripe && !isNaN(feeAmount) && feeAmount > 0) {
+      try {
+        const coach      = await Coach.findById(req.coachId).select('team_name');
+        const teamLabel  = coach?.team_name || 'Team';
+        const productName = `${teamLabel} - ${location} - ${date}`;
+        const product = await stripe.products.create({ name: productName });
+        const price   = await stripe.prices.create({
+          product:     product.id,
+          unit_amount: Math.round(feeAmount * 100),
+          currency:    'usd',
+        });
+        await Tryout.findByIdAndUpdate(tryout._id, {
+          stripe_product_id: product.id,
+          stripe_price_id:   price.id,
+        });
+        tryout.stripe_product_id = product.id;
+        tryout.stripe_price_id   = price.id;
+        console.log(`📦  Stripe tryout product created: "${productName}" → ${product.id} / ${price.id}`);
+      } catch (stripeErr) {
+        console.error('⚠️  Stripe tryout product creation failed:', stripeErr.message);
+      }
+    }
+
     res.status(201).json({ message: 'Tryout added', tryout: normalizeTryout(tryout) });
   } catch (err) {
     res.status(500).json({ message: err.message || 'Server error' });
@@ -989,12 +1295,91 @@ app.put('/api/coach/tryouts/:tryoutId', requireAuth, async (req, res) => {
     const { date, time, location, fee, city, state } = req.body;
     if (!date || !time || !location)
       return res.status(400).json({ message: 'date, time and location are required' });
+
+    const existing = await Tryout.findOne({ _id: req.params.tryoutId, coach_id: req.coachId });
+    if (!existing) return res.status(404).json({ message: 'Tryout not found' });
+
+    const newFee     = fee || 'Free';
+    const feeAmount  = parseFloat((newFee).replace('$', ''));
+    const isFree     = isNaN(feeAmount) || feeAmount <= 0;
+
+    // Fields that affect the Stripe product name
+    const nameChanged = existing.location !== location || existing.date !== date;
+    const oldFeeAmt   = parseFloat((existing.fee || '').replace('$', ''));
+    const feeChanged  = oldFeeAmt !== feeAmount;
+
+    let stripeProductId = existing.stripe_product_id || '';
+    let stripePriceId   = existing.stripe_price_id   || '';
+
+    if (stripe) {
+      try {
+        if (isFree) {
+          // Fee removed — archive existing product if any
+          if (stripeProductId) {
+            await deleteStripeProduct(stripeProductId);
+            console.log(`🗑️  Tryout fee removed — archived product ${stripeProductId}`);
+          }
+          stripeProductId = '';
+          stripePriceId   = '';
+
+        } else if (!stripeProductId) {
+          // No product yet (legacy record or missed on create) — create fresh
+          const coach      = await Coach.findById(req.coachId).select('team_name');
+          const teamLabel  = coach?.team_name || 'Team';
+          const productName = `${teamLabel} - ${location} - ${date}`;
+          const product = await stripe.products.create({ name: productName });
+          const price   = await stripe.prices.create({
+            product:     product.id,
+            unit_amount: Math.round(feeAmount * 100),
+            currency:    'usd',
+          });
+          stripeProductId = product.id;
+          stripePriceId   = price.id;
+          console.log(`📦  Stripe tryout product created (edit): "${productName}" → ${product.id} / ${price.id}`);
+
+        } else {
+          // Product exists — update name if location/date changed
+          if (nameChanged) {
+            const coach      = await Coach.findById(req.coachId).select('team_name');
+            const teamLabel  = coach?.team_name || 'Team';
+            const productName = `${teamLabel} - ${location} - ${date}`;
+            await stripe.products.update(stripeProductId, { name: productName });
+            console.log(`✏️  Stripe tryout product renamed: "${productName}"`);
+          }
+
+          // Update price if fee changed — deactivate old, create new
+          if (feeChanged) {
+            if (stripePriceId) {
+              await stripe.prices.update(stripePriceId, { active: false });
+              console.log(`🗑️  Old Stripe price deactivated: ${stripePriceId}`);
+            }
+            const price = await stripe.prices.create({
+              product:     stripeProductId,
+              unit_amount: Math.round(feeAmount * 100),
+              currency:    'usd',
+            });
+            stripePriceId = price.id;
+            console.log(`💰  New Stripe price created: ${price.id} ($${feeAmount})`);
+          }
+        }
+      } catch (stripeErr) {
+        console.error('⚠️  Stripe tryout product sync failed:', stripeErr.message);
+      }
+    }
+
     const tryout = await Tryout.findOneAndUpdate(
       { _id: req.params.tryoutId, coach_id: req.coachId },
-      { date, time, location, fee: fee || 'Free', city: city || '', state: state || '' },
+      {
+        date, time, location,
+        fee:               newFee,
+        city:              city  || '',
+        state:             state || '',
+        stripe_product_id: stripeProductId,
+        stripe_price_id:   stripePriceId,
+      },
       { new: true }
     );
-    if (!tryout) return res.status(404).json({ message: 'Tryout not found' });
+
     res.json({ message: 'Tryout updated', tryout: normalizeTryout(tryout) });
   } catch (err) {
     res.status(500).json({ message: err.message || 'Server error' });
@@ -1089,15 +1474,16 @@ app.get('/api/coach/financials', requireAuth, async (req, res) => {
 });
 
 // POST /api/coach/financials
-// Creates or updates financial settings and syncs GHL products/prices.
+// Creates or updates financial settings and syncs Stripe products/prices directly.
 //
 // Rules:
-//   • Deposit OFF  → only Full Payment product in GHL
-//   • Deposit ON   → only Deposit + Remaining Balance products in GHL (no Full Payment)
-//   • Monthly payments can exist alongside either of the above
-//   • Fee change   → delete all old GHL products and recreate fresh
-//   • Toggle OFF   → delete that product, clear stored IDs
-//   • GHL failure  → logs error but always saves to MongoDB
+//   • Deposit OFF, Monthly OFF  → Full Payment product only
+//   • Deposit ON,  Monthly OFF  → Deposit + Remaining Balance products (no Full Payment)
+//   • Deposit OFF, Monthly ON   → Monthly Installment product only (no Full, no Remainder)
+//   • Deposit ON,  Monthly ON   → Deposit + Monthly Installment products only (NO Remainder — balance collected via installments)
+//   • Fee change   → archive all old Stripe products and recreate fresh
+//   • Toggle OFF   → archive that product, clear stored IDs
+//   • Stripe error → logs error but always saves to MongoDB
 app.post('/api/coach/financials', requireAuth, async (req, res) => {
   try {
     const {
@@ -1110,7 +1496,7 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
       installmentMonths,
     } = req.body;
 
-    // ── Fetch coach team name for GHL product labels ──────────
+    // ── Fetch coach team name for Stripe product labels ───────
     const coach = await Coach.findById(req.coachId).select('team_name');
     const teamLabel = coach?.team_name || 'Team';
 
@@ -1141,109 +1527,137 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
       installment_months: months,
     };
 
-    // ── GHL product/price sync ────────────────────────────────
+    // ── Stripe product/price sync ─────────────────────────────
     try {
-      // carry() returns the stored ID if fee is unchanged, '' if fee changed (forces recreation)
+      // carry() returns the stored Stripe ID if fee is unchanged, '' if fee changed
       const carry = (field) => feeChanged ? '' : (existing?.[field] || '');
 
-      update.ghl_product_full        = carry('ghl_product_full');
-      update.ghl_price_full          = carry('ghl_price_full');
-      update.ghl_product_deposit     = carry('ghl_product_deposit');
-      update.ghl_price_deposit       = carry('ghl_price_deposit');
-      update.ghl_product_remainder   = carry('ghl_product_remainder');
-      update.ghl_price_remainder     = carry('ghl_price_remainder');
-      update.ghl_product_installment = carry('ghl_product_installment');
-      update.ghl_price_installment   = carry('ghl_price_installment');
+      update.stripe_product_full        = carry('stripe_product_full');
+      update.stripe_price_full          = carry('stripe_price_full');
+      update.stripe_product_deposit     = carry('stripe_product_deposit');
+      update.stripe_price_deposit       = carry('stripe_price_deposit');
+      update.stripe_product_remainder   = carry('stripe_product_remainder');
+      update.stripe_price_remainder     = carry('stripe_price_remainder');
+      update.stripe_product_installment = carry('stripe_product_installment');
+      update.stripe_price_installment   = carry('stripe_price_installment');
 
-      // If fee changed, delete all old GHL products first
+      // If fee changed — update prices on existing products (keep product IDs, never archive)
+      // Payment type changes (deposit on/off, monthly on/off) are handled per-product below
       if (feeChanged && existing) {
-        console.log('💱  Fee changed — deleting old GHL products and recreating...');
-        await Promise.all([
-          deleteGHLProduct(existing.ghl_product_full),
-          deleteGHLProduct(existing.ghl_product_deposit),
-          deleteGHLProduct(existing.ghl_product_remainder),
-          deleteGHLProduct(existing.ghl_product_installment),
-        ]);
+        console.log('💱  Fee changed — updating prices on existing Stripe products...');
+
+        // Full pay — update price only if product exists and deposit is still OFF
+        if (existing.stripe_product_full && !depositEnabled) {
+          const newPriceId = await updateStripeProductPrice(existing.stripe_product_full, fee);
+          update.stripe_product_full = existing.stripe_product_full;
+          update.stripe_price_full   = newPriceId;
+        }
+
+        // Deposit — update price only if product exists and deposit is still ON
+        if (existing.stripe_product_deposit && depositEnabled && deposit > 0) {
+          const newPriceId = await updateStripeProductPrice(existing.stripe_product_deposit, deposit);
+          update.stripe_product_deposit = existing.stripe_product_deposit;
+          update.stripe_price_deposit   = newPriceId;
+        }
+
+        // Remainder — update price only if product exists and conditions still apply
+        if (existing.stripe_product_remainder && depositEnabled && remainder > 0 && !monthlyPayments) {
+          const newPriceId = await updateStripeProductPrice(existing.stripe_product_remainder, remainder);
+          update.stripe_product_remainder = existing.stripe_product_remainder;
+          update.stripe_price_remainder   = newPriceId;
+        }
+
+        // Installment — just deactivate old prices, new prices created per-player at checkout
+        if (existing.stripe_product_installment && monthlyPayments) {
+          const prices = await stripe.prices.list({ product: existing.stripe_product_installment, active: true, limit: 100 });
+          await Promise.all(prices.data.map(p => stripe.prices.update(p.id, { active: false })));
+          update.stripe_product_installment = existing.stripe_product_installment;
+          update.stripe_price_installment   = '';
+        }
       }
 
-      // ── Full pay product (ONLY when deposit is OFF) ───────
+      // ── Full pay product (ONLY when deposit is OFF) ───────────────────────────
       if (!depositEnabled) {
-        if (fee > 0 && !update.ghl_product_full) {
-          const { productId, priceId } = await createGHLProductWithPrice(
-            `${teamLabel} – Full Payment ($${fee})`,
-            fee
+        if (fee > 0 && !update.stripe_product_full) {
+          // No existing product (new setup or deposit just turned OFF) — create fresh
+          const { productId, priceId } = await createStripeProductWithPrice(
+            `${teamLabel} – Full Payment ($${fee})`, fee
           );
-          update.ghl_product_full = productId;
-          update.ghl_price_full   = priceId;
+          update.stripe_product_full = productId;
+          update.stripe_price_full   = priceId;
         }
       } else {
-        // Deposit is ON — full pay product is not needed; delete if it exists
-        if (existing?.ghl_product_full && !feeChanged) {
-          await deleteGHLProduct(existing.ghl_product_full);
+        // Deposit turned ON — full pay product no longer needed, archive it
+        if (existing?.stripe_product_full) {
+          await deleteStripeProduct(existing.stripe_product_full);
         }
-        update.ghl_product_full = '';
-        update.ghl_price_full   = '';
+        update.stripe_product_full = '';
+        update.stripe_price_full   = '';
       }
 
-      // ── Deposit product (ONLY when deposit is ON) ─────────
+      // ── Deposit product (ONLY when deposit is ON) ─────────────────────────────
       if (depositEnabled && deposit > 0) {
-        if (!update.ghl_product_deposit) {
-          const { productId, priceId } = await createGHLProductWithPrice(
-            `${teamLabel} – Deposit ($${deposit})`,
-            deposit
+        if (!update.stripe_product_deposit) {
+          // No existing product (new setup or deposit just turned ON) — create fresh
+          const { productId, priceId } = await createStripeProductWithPrice(
+            `${teamLabel} – Deposit ($${deposit})`, deposit
           );
-          update.ghl_product_deposit = productId;
-          update.ghl_price_deposit   = priceId;
+          update.stripe_product_deposit = productId;
+          update.stripe_price_deposit   = priceId;
         }
       } else {
-        // Deposit toggled OFF — delete if it existed and this isn't a fee-change wipe
-        if (existing?.ghl_product_deposit && !feeChanged) {
-          await deleteGHLProduct(existing.ghl_product_deposit);
+        // Deposit turned OFF — archive deposit product
+        if (existing?.stripe_product_deposit) {
+          await deleteStripeProduct(existing.stripe_product_deposit);
         }
-        update.ghl_product_deposit = '';
-        update.ghl_price_deposit   = '';
+        update.stripe_product_deposit = '';
+        update.stripe_price_deposit   = '';
       }
 
-      // ── Remainder product (balance after deposit, ONLY when deposit is ON) ──
-      if (depositEnabled && remainder > 0) {
-        if (!update.ghl_product_remainder) {
-          const { productId, priceId } = await createGHLProductWithPrice(
-            `${teamLabel} – Remaining Balance ($${remainder})`,
-            remainder
+      // ── Remainder product (deposit ON + monthly OFF only) ─────────────────────
+      if (depositEnabled && remainder > 0 && !monthlyPayments) {
+        if (!update.stripe_product_remainder) {
+          // No existing product — create fresh
+          const { productId, priceId } = await createStripeProductWithPrice(
+            `${teamLabel} – Remaining Balance ($${remainder})`, remainder
           );
-          update.ghl_product_remainder = productId;
-          update.ghl_price_remainder   = priceId;
+          update.stripe_product_remainder = productId;
+          update.stripe_price_remainder   = priceId;
         }
       } else {
-        if (existing?.ghl_product_remainder && !feeChanged) {
-          await deleteGHLProduct(existing.ghl_product_remainder);
+        // Conditions no longer met — archive remainder product
+        if (existing?.stripe_product_remainder) {
+          await deleteStripeProduct(existing.stripe_product_remainder);
         }
-        update.ghl_product_remainder = '';
-        update.ghl_price_remainder   = '';
+        update.stripe_product_remainder = '';
+        update.stripe_price_remainder   = '';
       }
 
-      // ── Monthly installment product ───────────────────────
-      if (monthlyPayments && installment > 0) {
-        if (!update.ghl_product_installment) {
-          const { productId, priceId } = await createGHLProductWithPrice(
-            `${teamLabel} – Monthly Installment ($${installment}/mo × ${months})`,
-            installment,
-            { interval: 'month', intervalCount: 1 }
-          );
-          update.ghl_product_installment = productId;
-          update.ghl_price_installment   = priceId;
+      // ── Monthly installment product ───────────────────────────────────────────
+      // ONE product created as container. Prices created per-player at checkout.
+      if (monthlyPayments) {
+        if (!update.stripe_product_installment) {
+          // No existing product — create fresh
+          const product = await stripe.products.create({
+            name: `${teamLabel} – Monthly Installment`,
+            metadata: { coachId: String(req.coachId), teamLabel },
+          });
+          update.stripe_product_installment = product.id;
+          update.stripe_price_installment   = '';
+          console.log(`📦  Stripe installment product created: ${product.id}`);
         }
       } else {
-        if (existing?.ghl_product_installment && !feeChanged) {
-          await deleteGHLProduct(existing.ghl_product_installment);
+        // Monthly turned OFF — archive installment product
+        if (existing?.stripe_product_installment) {
+          await deleteStripeProduct(existing.stripe_product_installment);
         }
-        update.ghl_product_installment = '';
-        update.ghl_price_installment   = '';
+        update.stripe_product_installment = '';
+        update.stripe_price_installment   = '';
       }
 
-    } catch (ghlErr) {
-      // GHL errors are non-fatal — always fall through to the DB save
-      console.error('⚠️  GHL product sync error:', ghlErr.response?.data || ghlErr.message);
+    } catch (stripeErr) {
+      // Stripe errors are non-fatal — always fall through to the DB save
+      console.error('⚠️  Stripe product sync error:', stripeErr.message);
     }
 
     // ── Persist to MongoDB ────────────────────────────────────
@@ -1264,6 +1678,109 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
 // POST /api/checkout
 // Body: { coachId, paymentType, playerPaymentId, successUrl, cancelUrl }
 // paymentType: 'full' | 'deposit' | 'remainder' | 'installment'
+
+/**
+ * Returns the number of whole calendar months from today up to and including
+ * the deadline month, accounting for the day the player registered (charge day).
+ *
+ * chargeDay = day of month the player registered (Stripe bills on this day each month).
+ * If the charge day in the deadline month falls AFTER the deadline date, that month's
+ * charge will never fire before cancel_at kicks in — so we exclude it.
+ *
+ * Example: registered April 16, deadline October 15
+ *   → October charge fires Oct 16, which is after Oct 15 deadline → excluded
+ *   → 6 months counted (Apr, May, Jun, Jul, Aug, Sep)
+ *
+ * Always returns at least 1.
+ */
+function monthsRemainingUntilDeadline(deadlineStr, chargeDay) {
+  if (!deadlineStr) return 1;
+  const now      = new Date();
+  const deadline = new Date(deadlineStr);
+  if (isNaN(deadline)) return 1;
+
+  const nowMonth      = now.getFullYear() * 12 + now.getMonth();
+  const deadlineMonth = deadline.getFullYear() * 12 + deadline.getMonth();
+
+  let months = deadlineMonth - nowMonth + 1;
+
+  // If Stripe would charge later in the month than the deadline date,
+  // that last charge is blocked by cancel_at — do not count it
+  const day = chargeDay || now.getDate();
+  if (day > deadline.getDate()) {
+    months = months - 1;
+  }
+
+  return Math.max(1, months);
+}
+
+// GET /api/teams/:id/installment-preview
+// Public — returns the dynamic per-month amount for a player registering today.
+// Used by team.html to show the correct payment plan before checkout.
+app.get('/api/teams/:id/installment-preview', async (req, res) => {
+  try {
+    const financials = await TeamFinancials.findOne({ coach_id: req.params.id });
+    if (!financials || !financials.monthly_payments) {
+      return res.json({ enabled: false });
+    }
+
+    const fee        = financials.player_fee     || 0;
+    const deposit    = financials.deposit_amount || 0;
+    const depEnabled = financials.deposit_enabled || false;
+    const balance    = depEnabled ? Math.max(0, fee - deposit) : fee;
+    const chargeDay  = new Date().getDate();
+    const months     = monthsRemainingUntilDeadline(financials.payment_deadline, chargeDay);
+    const perMonth   = months > 0 ? Math.ceil((balance / months) * 100) / 100 : balance;
+
+    res.json({
+      enabled:         true,
+      months,
+      perMonth,
+      balance,
+      totalFee:        fee,
+      depositEnabled:  depEnabled,
+      depositAmount:   deposit,
+      paymentDeadline: financials.payment_deadline || '',
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// POST /api/send-payment-notification
+// Called by frontend after Stripe redirects back with ?payment=success
+// Body: { playerPaymentId }
+app.post('/api/send-payment-notification', async (req, res) => {
+  try {
+    const { playerPaymentId } = req.body;
+    if (!playerPaymentId) return res.status(400).json({ message: 'playerPaymentId is required' });
+
+    const pmt = await PlayerPayment.findById(playerPaymentId);
+    if (!pmt) return res.status(404).json({ message: 'Payment record not found' });
+
+    const playerRec = pmt.player_id ? await Player.findById(pmt.player_id).select('email cell') : null;
+    const coachRec  = pmt.coach_id  ? await Coach.findById(pmt.coach_id).select('first_name last_name team_name') : null;
+
+    await sendPaymentNotificationEmail({
+      playerName:  pmt.player_name    || '',
+      paymentType: pmt.status === 'Paid' ? 'full' : 'deposit',
+      amountPaid:  pmt.amount_paid    ?? 0,
+      totalFee:    pmt.total_fee      ?? 0,
+      balance:     pmt.balance        ?? 0,
+      status:      pmt.status         || '',
+      playerEmail: playerRec?.email   || '',
+      playerCell:  playerRec?.cell    || '',
+      coachName:   coachRec ? `${coachRec.first_name} ${coachRec.last_name}` : '',
+      teamName:    coachRec?.team_name || '',
+    });
+
+    res.json({ message: 'Notification sent' });
+  } catch (err) {
+    console.error('❌  send-payment-notification error:', err.message);
+    res.status(500).json({ message: err.message });
+  }
+});
+
 app.post('/api/checkout', async (req, res) => {
   if (!stripe) return res.status(500).json({ message: 'Stripe is not configured on the server' });
 
@@ -1273,105 +1790,187 @@ app.post('/api/checkout', async (req, res) => {
       return res.status(400).json({ message: 'coachId, paymentType, and playerPaymentId are required' });
     }
 
-    // ── Get team financials to build the product name ─────────
+    // ── Get stored Stripe price IDs from financials ───────────
     const financials = await TeamFinancials.findOne({ coach_id: coachId });
     if (!financials) return res.status(404).json({ message: 'Team financials not found' });
 
     const coach = await Coach.findById(coachId).select('team_name');
     const teamLabel = coach?.team_name || 'Team';
 
-    const fee         = financials.player_fee     || 0;
-    const deposit     = financials.deposit_amount || 250;
-    const months      = financials.installment_months || 3;
-    const remainder   = Math.max(0, fee - deposit);
-    const installment = months > 0 ? Math.round((fee / months) * 100) / 100 : fee;
+    // ── Build checkout session ────────────────────────────────
+    let lineItems;
+    let mode;
 
-    // ── Map paymentType → exact Stripe product name ───────────
-    const productNameMap = {
-      full:        `${teamLabel} – Full Payment ($${fee})`,
-      deposit:     `${teamLabel} – Deposit ($${deposit})`,
-      remainder:   `${teamLabel} – Remaining Balance ($${remainder})`,
-      installment: `${teamLabel} – Monthly Installment ($${installment}/mo × ${months})`,
-    };
-
-    const productName = productNameMap[paymentType];
-    if (!productName) return res.status(400).json({ message: `Unknown paymentType: ${paymentType}` });
-
-    // ── Search Stripe for the product by exact name ───────────
-    const productSearch = await stripe.products.search({
-      query: `name:"${productName}"`,
-      limit: 1,
-    });
-
-    if (!productSearch.data.length) {
-      return res.status(404).json({ message: `Stripe product not found: "${productName}". It may still be syncing — please try again in a moment.` });
-    }
-
-    const stripeProduct = productSearch.data[0];
-
-    // ── TEMPORARY DEBUG LOG ───────────────────────────────────
-    const allPricesDebug = await stripe.prices.list({ product: stripeProduct.id, limit: 10 });
-    console.log(`🔍 DEBUG — Product: "${productName}" | Stripe productId: ${stripeProduct.id} | Total prices found: ${allPricesDebug.data.length}`);
-    allPricesDebug.data.forEach(p => {
-      console.log(`   price_id: ${p.id} | amount: $${p.unit_amount/100} | active: ${p.active} | created: ${new Date(p.created * 1000).toISOString()}`);
-    });
-    // ── END DEBUG ─────────────────────────────────────────────
-
-    // ── Map paymentType → amount in cents ────────────────────
-    const amountMap = {
-      full:        Math.round(fee         * 100),
-      deposit:     Math.round(deposit     * 100),
-      remainder:   Math.round(remainder   * 100),
-      installment: Math.round(installment * 100),
-    };
-    const amountCents = amountMap[paymentType] || 0;
-
-    // ── Get the active price for this product ─────────────────
-    let prices = await stripe.prices.list({ product: stripeProduct.id, active: true, limit: 1 });
-
-    if (!prices.data.length) {
-      // No active price — check if any price exists (inactive)
-      const allPrices = await stripe.prices.list({ product: stripeProduct.id, limit: 10 });
-
-      if (allPrices.data.length) {
-        // Price exists but inactive — activate it
-        const toActivate = allPrices.data[0];
-        const activated  = await stripe.prices.update(toActivate.id, { active: true });
-        console.log(`✅  Auto-activated Stripe price: ${activated.id} for product: "${productName}"`);
-        prices = { data: [activated] };
-      } else {
-        // No price at all — GHL synced the product but not the price, create it directly in Stripe
-        console.log(`⚠️  No price found in Stripe for "${productName}" — creating directly in Stripe`);
-        const isInstallment = paymentType === 'installment';
-        const newPrice = await stripe.prices.create({
-          product:     stripeProduct.id,
-          unit_amount: amountCents,
-          currency:    'usd',
-          ...(isInstallment ? {
-            recurring: { interval: 'month', interval_count: 1 },
-          } : {}),
-        });
-        console.log(`✅  Stripe price created directly: ${newPrice.id} for product: "${productName}"`);
-        prices = { data: [newPrice] };
+    if (paymentType === 'installment') {
+      // ── DYNAMIC installment: calculate months remaining for this player ──
+      if (!financials.monthly_payments) {
+        return res.status(400).json({ message: 'Monthly payments are not enabled for this team.' });
       }
-    }
 
-    const priceId = prices.data[0].id;
+      const productId = financials.stripe_product_installment;
+      if (!productId) {
+        return res.status(404).json({
+          message: 'No installment product found. Please re-save your financial setup.',
+        });
+      }
+
+      if (!financials.payment_deadline) {
+        return res.status(400).json({ message: 'No payment deadline set. Coach must set a deadline first.' });
+      }
+
+      const fee          = financials.player_fee      || 0;
+      const deposit      = financials.deposit_amount  || 0;
+      const depEnabled   = financials.deposit_enabled || false;
+
+      // Balance to split = full fee, or fee minus deposit if deposit is enabled
+      const balanceToSplit = depEnabled ? Math.max(0, fee - deposit) : fee;
+      if (balanceToSplit <= 0) {
+        return res.status(400).json({ message: 'No balance remaining to split into installments.' });
+      }
+
+      const chargeDay     = new Date().getDate();
+      const months        = monthsRemainingUntilDeadline(financials.payment_deadline, chargeDay);
+      // Industry-standard first-payment adjustment:
+      // Base amount = floor(total / months), remainder goes on month 1.
+      // e.g. $1000 / 3 = $333.33 base, $0.01 remainder
+      //   Month 1 → $333.34, Month 2-3 → $333.33, Total = $1000.00 exactly.
+      // The first payment is handled by checkout.session.completed which already
+      // records amountPaid from session.amount_total — so the correct amount is
+      // always captured regardless of which month it is.
+      const baseMonthCents      = Math.floor((balanceToSplit / months) * 100);
+      const remainderCents      = Math.round(balanceToSplit * 100) - (baseMonthCents * months);
+      const firstMonthCents     = baseMonthCents + remainderCents; // month 1 absorbs remainder
+      const perMonthCents       = baseMonthCents;                  // months 2-N use base amount
+
+      console.log(`📅  Installment checkout — deadline=${financials.payment_deadline} months=${months} balance=$${balanceToSplit} per-month=$${(perMonthCents/100).toFixed(2)}`);
+
+      // ── Find existing price for this exact amount AND month count ──────
+      // We match on BOTH unit_amount AND months metadata to avoid reusing a
+      // price from a previous deadline/registration that happens to have the
+      // same dollar amount but a different number of installments.
+      // e.g. $500/mo over 2 months vs $500/mo over 4 months are different plans
+      // even though the Stripe price amount is identical.
+      const existingPrices = await stripe.prices.list({
+        product: productId,
+        active:  true,
+        limit:   100,
+      });
+
+      // Find or create the BASE recurring price (months 2-N)
+      let installmentPrice = existingPrices.data.find(p =>
+        p.unit_amount === perMonthCents &&
+        p.metadata?.months === String(months) &&
+        p.metadata?.paymentDeadline === financials.payment_deadline
+      );
+
+      if (installmentPrice) {
+        console.log(`♻️  Reusing existing Stripe price ${installmentPrice.id} (${perMonthCents/100}/mo × ${months} months)`);
+      } else {
+        installmentPrice = await stripe.prices.create({
+          product:     productId,
+          unit_amount: perMonthCents,
+          currency:    'usd',
+          recurring:   { interval: 'month', interval_count: 1 },
+          metadata:    {
+            months:          String(months),
+            paymentDeadline: financials.payment_deadline,
+            balanceToSplit:  String(balanceToSplit),
+          },
+        });
+        console.log(`💰  New Stripe price created ${installmentPrice.id} (${perMonthCents/100}/mo × ${months} months)`);
+      }
+
+      // If there is a remainder, add a one-time invoice item for the extra cents.
+      // Stripe will merge it into the first invoice automatically so the player
+      // sees a single charge of (base + remainder) on month 1.
+      if (remainderCents > 0) {
+        // We need the customer ID — look it up after session creation via webhook.
+        // Store remainderCents in session metadata so the webhook can add it.
+        console.log(`🪙  Remainder ${remainderCents} cents will be added to first invoice`);
+      }
+
+      // ── cancel_at = deadline date (Stripe auto-cancels the subscription) ──
+      const cancelAtTimestamp = Math.floor(new Date(financials.payment_deadline) / 1000);
+
+      mode      = 'subscription';
+      lineItems = [{ price: installmentPrice.id, quantity: 1 }];
+
+      // Store for use in session metadata below
+      req._installmentTotalMonths    = months;
+      req._installmentRemainderCents = remainderCents;
+
+      // Store cancel_at for use in session creation below
+      req._installmentCancelAt = cancelAtTimestamp;
+
+      console.log(`📅  Installment plan — months=${months} base=${perMonthCents/100} remainder=${remainderCents}cents first=${firstMonthCents/100}`);
+
+    } else {
+      // ── Static payment types: full | deposit | remainder ──────
+      const priceIdMap = {
+        full:      financials.stripe_price_full,
+        deposit:   financials.stripe_price_deposit,
+        remainder: financials.stripe_price_remainder,
+      };
+
+      const priceId = priceIdMap[paymentType];
+      if (!priceId) {
+        return res.status(404).json({
+          message: `No Stripe price found for paymentType "${paymentType}". Please re-save your financial setup to generate Stripe products.`,
+        });
+      }
+
+      // Verify the price is still active in Stripe
+      let price;
+      try {
+        price = await stripe.prices.retrieve(priceId);
+      } catch (err) {
+        return res.status(404).json({ message: `Stripe price ${priceId} not found: ${err.message}` });
+      }
+
+      if (!price.active) {
+        return res.status(400).json({
+          message: `Stripe price ${priceId} is inactive. Please re-save your financial setup to regenerate Stripe products.`,
+        });
+      }
+
+      mode      = 'payment';
+      lineItems = [{ price: priceId, quantity: 1 }];
+    }
 
     // ── Create checkout session ───────────────────────────────
-    const session = await stripe.checkout.sessions.create({
-      mode: paymentType === 'installment' ? 'subscription' : 'payment',
-      line_items: [{ price: priceId, quantity: 1 }],
+    const sessionParams = {
+      mode,
+      line_items: lineItems,
       success_url: successUrl || `${req.headers.origin || 'https://yoursite.com'}?payment=success`,
       cancel_url:  cancelUrl  || `${req.headers.origin || 'https://yoursite.com'}?payment=cancelled`,
       metadata: {
         playerPaymentId,
         paymentType,
         coachId,
+        ...(paymentType === 'installment' ? {
+          paymentDeadline: financials.payment_deadline || '',
+          totalMonths:     String(req._installmentTotalMonths || 0),
+          remainderCents:  String(req._installmentRemainderCents || 0),
+        } : {}),
       },
-    });
+    };
 
-    console.log(`🛒  Stripe checkout created — type=${paymentType} product="${productName}" session=${session.id}`);
+    // For installments: store playerPaymentId on the subscription itself
+    // so the customer.subscription.deleted webhook can link back to the player
+    if (paymentType === 'installment') {
+      sessionParams.subscription_data = {
+        metadata: {
+          playerPaymentId,
+          coachId,
+          totalMonths:    String(req._installmentTotalMonths || 0),
+          remainderCents: String(req._installmentRemainderCents || 0),
+        },
+      };
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionParams);
+
+    console.log(`🛒  Stripe checkout created — type=${paymentType} session=${session.id}`);
     res.json({ url: session.url });
 
   } catch (err) {
@@ -1456,11 +2055,13 @@ app.get('/api/coach/budgets', requireAuth, async (req, res) => {
 
 app.post('/api/coach/budgets', requireAuth, async (req, res) => {
   try {
+    const existing = await Budget.findOne({ coach_id: req.coachId });
+    if (existing) return res.status(409).json({ message: 'You already have a budget. Delete it first to create a new one.' });
     const {
       date, players, seasons, numEvents, eventCost, tournaments,
       headPay, asstPay, rentals, gas, hotelNights, hotelAvg, hotels,
       numUniforms, uniformCost, uniforms, equipment, insurance,
-      ambassadors, others, total, perPlayer
+      ambassadors, others, total, perPlayer, status
     } = req.body;
     const data = await Budget.create({
       coach_id:     req.coachId,
@@ -1486,6 +2087,7 @@ app.post('/api/coach/budgets', requireAuth, async (req, res) => {
       others:       others       || [],
       total:        total        || 0,
       per_player:   perPlayer    || 0,
+      status:       status       || 'draft',
     });
     res.status(201).json({ message: 'Budget saved', budget: data });
   } catch (err) {
@@ -1499,7 +2101,7 @@ app.put('/api/coach/budgets/:budgetId', requireAuth, async (req, res) => {
       players, seasons, numEvents, eventCost, tournaments,
       headPay, asstPay, rentals, gas, hotelNights, hotelAvg, hotels,
       numUniforms, uniformCost, uniforms, equipment, insurance,
-      ambassadors, others, total, perPlayer
+      ambassadors, others, total, perPlayer, status
     } = req.body;
     const data = await Budget.findOneAndUpdate(
       { _id: req.params.budgetId, coach_id: req.coachId },
@@ -1525,6 +2127,7 @@ app.put('/api/coach/budgets/:budgetId', requireAuth, async (req, res) => {
         others:       others       || [],
         total:        total        || 0,
         per_player:   perPlayer    || 0,
+        ...(status && { status }),
       },
       { new: true }
     );
@@ -1647,6 +2250,18 @@ app.get('/api/admin/coaches/:id/token', requireAdmin, async (req, res) => {
   }
 });
 
+// DELETE /api/admin/coaches/:id — delete coach account only (related data kept)
+app.delete('/api/admin/coaches/:id', requireAdmin, async (req, res) => {
+  try {
+    const coach = await Coach.findById(req.params.id);
+    if (!coach) return res.status(404).json({ message: 'Coach not found' });
+    await Coach.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Coach deleted' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // ════════════════════════════════════════════════════════════════
 //  PUBLIC ROUTES
 // ════════════════════════════════════════════════════════════════
@@ -1690,6 +2305,32 @@ app.get('/api/teams/:id/tryouts', async (req, res) => {
 
 app.get('/api/teams/:id/roster', async (req, res) => {
   try {
+    // ── ?paid=true — public team page: only show players with a completed checkout ──
+    // Coach dashboard calls this endpoint WITHOUT ?paid=true so it always sees everyone.
+    if (req.query.paid === 'true') {
+      // Only filter if the team actually has a fee configured.
+      // If no financials exist (no payment required) show all registered players.
+      const financials = await TeamFinancials.findOne({ coach_id: req.params.id });
+
+      if (financials && (financials.player_fee || 0) > 0) {
+        // Find payment records where at least one successful payment was received
+        const paidRecords = await PlayerPayment.find({
+          coach_id:    req.params.id,
+          amount_paid: { $gt: 0 },
+        }).select('player_id');
+
+        const paidIds = paidRecords.map(r => r.player_id).filter(Boolean);
+
+        const players = await Player.find({
+          coach_id: req.params.id,
+          _id:      { $in: paidIds },
+        }).sort({ created_at: 1 });
+
+        return res.json({ players: players.map(normalizePlayer) });
+      }
+      // No financials / no fee set → fall through and return all players
+    }
+
     const players = await Player.find({ coach_id: req.params.id }).sort({ created_at: 1 });
     res.json({ players: players.map(normalizePlayer) });
   } catch (err) {
@@ -1826,9 +2467,15 @@ app.get('/api/teams/:id/financials', async (req, res) => {
 app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
   try {
     const { completedBy, name, address, city, state, zip, cell, email,
-            playerName, age, dob, hw, pos1, pos2, tryoutDate } = req.body;
+            playerName, age, dob, hw, pos1, pos2, tryoutDate, successUrl, cancelUrl } = req.body;
     if (!name || !playerName) return res.status(400).json({ message: 'Name and player name are required' });
 
+    // ── Look up the tryout to check if it has a fee ───────────
+    const tryout = await Tryout.findOne({ coach_id: req.params.id, date: tryoutDate });
+    const tryoutFeeAmount = tryout ? parseFloat((tryout.fee || '').replace('$', '')) : NaN;
+    const isPaid = tryout && tryout.stripe_price_id && !isNaN(tryoutFeeAmount) && tryoutFeeAmount > 0;
+
+    // ── Save registration — pending_payment if paid, confirmed if free ──
     const reg = await TryoutRegistration.create({
       coach_id:     req.params.id,
       completed_by: completedBy || '',
@@ -1846,8 +2493,34 @@ app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
       pos1:         pos1        || '',
       pos2:         pos2        || '',
       tryout_date:  tryoutDate  || '',
+      status:       isPaid ? 'pending_payment' : 'confirmed',
     });
 
+    // ── If paid, create Stripe checkout and return URL ────────
+    if (isPaid && stripe) {
+      try {
+        const session = await stripe.checkout.sessions.create({
+          mode:        'payment',
+          line_items:  [{ price: tryout.stripe_price_id, quantity: 1 }],
+          success_url: successUrl || `${req.headers.origin || ''}?tryout_payment=success`,
+          cancel_url:  cancelUrl  || `${req.headers.origin || ''}?tryout_payment=cancelled`,
+          metadata: {
+            paymentType:    'tryout',
+            registrationId: String(reg._id),
+            coachId:        String(req.params.id),
+          },
+        });
+        console.log(`🛒  Tryout checkout created — registrationId=${reg._id} session=${session.id}`);
+        return res.status(201).json({ message: 'Proceed to payment', checkoutUrl: session.url, registration: reg });
+      } catch (stripeErr) {
+        console.error('❌  Tryout checkout creation failed:', stripeErr.message);
+        // Stripe failed — delete the pending record so the player can retry cleanly
+        await TryoutRegistration.findByIdAndDelete(reg._id);
+        return res.status(500).json({ message: 'Payment setup failed. Please try again.' });
+      }
+    }
+
+    // ── Free tryout — GHL upsert and return success ───────────
     const ghlResult = await upsertGHLContact({
       completedBy, name, address, city, state, zip, cell, email,
       playerName, age, dob, hw, pos1, pos2, tryoutDate,
@@ -1859,5 +2532,5 @@ app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
   }
 });
 
-// Vercel serverless — no app.listen needed
+// ── VERCEL EXPORT ────────────────────────────────────────────────────────────
 module.exports = app;
