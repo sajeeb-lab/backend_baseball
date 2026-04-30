@@ -2532,5 +2532,8 @@ app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
   }
 });
 
-// ── VERCEL EXPORT ────────────────────────────────────────────────────────────
-module.exports = app;
+// ── START SERVER ─────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`🚀  Server running on port ${PORT}`);
+});
