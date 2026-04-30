@@ -190,6 +190,27 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
           await PlayerPayment.findByIdAndUpdate(playerPaymentId, update);
           console.log(`✅  Stripe payment recorded — playerPaymentId=${playerPaymentId} type=${paymentType}`);
 
+          // ── Send payment notification email ───────────────────
+          try {
+            const updatedPmt = await PlayerPayment.findById(playerPaymentId);
+            const playerRec  = updatedPmt?.player_id ? await Player.findById(updatedPmt.player_id).select('email cell') : null;
+            const coachRec   = updatedPmt?.coach_id  ? await Coach.findById(updatedPmt.coach_id).select('first_name last_name team_name') : null;
+            await sendPaymentNotificationEmail({
+              playerName:  updatedPmt?.player_name || '',
+              paymentType,
+              amountPaid:  updatedPmt?.amount_paid ?? 0,
+              totalFee:    updatedPmt?.total_fee   ?? 0,
+              balance:     updatedPmt?.balance     ?? 0,
+              status:      updatedPmt?.status      || '',
+              playerEmail: playerRec?.email        || '',
+              playerCell:  playerRec?.cell         || '',
+              coachName:   coachRec ? `${coachRec.first_name} ${coachRec.last_name}` : '',
+              teamName:    coachRec?.team_name     || '',
+            });
+          } catch (emailErr) {
+            console.error('⚠️  Payment notification email error (checkout):', emailErr.message);
+          }
+
         }
       } catch (dbErr) {
         console.error('❌  Failed to update PlayerPayment after Stripe webhook:', dbErr.message);
