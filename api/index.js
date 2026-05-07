@@ -62,7 +62,7 @@ function generateOTP() {
 
 // ── PAYMENT NOTIFICATION EMAIL ────────────────────────────────
 async function sendPaymentNotificationEmail({ playerName, paymentType, amountPaid, totalFee, balance, status, playerEmail, playerCell, coachName, teamName, coachEmail }) {
-  const notifyEmail = 'jahirul@appsus.io';
+  const notifyEmail = 'sajeeb.codes@gmail.com';
   if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
     console.warn('⚠️  EMAIL_USER / EMAIL_PASS not set — skipping payment notification email');
     return;
