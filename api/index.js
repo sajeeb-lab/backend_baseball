@@ -110,7 +110,7 @@ const REQUIRED_ENV = ['MONGODB_URI', 'JWT_SECRET'];
 const missingEnv = REQUIRED_ENV.filter(k => !process.env[k]);
 if (missingEnv.length) {
   console.error('❌  Missing required environment variables:', missingEnv.join(', '));
-  process.exit(1);
+  // Note: process.exit() is not used in serverless — requests will fail gracefully
 }
 
 const app = express();
@@ -436,10 +436,39 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 
 app.use(express.json({ limit: '10mb' }));
 
-// ── MONGODB CONNECTION ────────────────────────────────────────────
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('✅  MongoDB connected'))
-  .catch(err => { console.error('❌  MongoDB connection error:', err); process.exit(1); });
+// ── MONGODB CONNECTION (serverless-safe cached connection) ────────
+// In serverless environments each invocation may reuse the same Node.js
+// process. We cache the connection promise so we never open more than
+// one connection per warm instance, and we don't block the module load.
+let mongoConnectPromise = null;
+
+function connectMongo() {
+  if (mongoose.connection.readyState >= 1) return Promise.resolve(); // already connected / connecting
+  if (!mongoConnectPromise) {
+    mongoConnectPromise = mongoose
+      .connect(process.env.MONGODB_URI, {
+        serverSelectionTimeoutMS: 10000,
+        maxPoolSize: 10,
+      })
+      .then(() => console.log('✅  MongoDB connected'))
+      .catch(err => {
+        mongoConnectPromise = null; // allow retry on next request
+        console.error('❌  MongoDB connection error:', err);
+        throw err;
+      });
+  }
+  return mongoConnectPromise;
+}
+
+// Ensure DB is connected before every request
+app.use(async (req, res, next) => {
+  try {
+    await connectMongo();
+    next();
+  } catch (err) {
+    res.status(503).json({ message: 'Database unavailable', error: err.message });
+  }
+});
 
 // ════════════════════════════════════════════════════════════════
 //  MONGOOSE SCHEMAS & MODELS
@@ -2522,8 +2551,6 @@ app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
   }
 });
 
-// ── START SERVER ─────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-  console.log(`🚀  Server running on port ${PORT}`);
-});
+// ── VERCEL SERVERLESS EXPORT ─────────────────────────────────────
+// Vercel invokes the exported Express app directly — no app.listen() needed.
+module.exports = app;
