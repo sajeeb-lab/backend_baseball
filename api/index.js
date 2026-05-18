@@ -694,13 +694,13 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
               } catch (e) { console.error('⚠️  Coach notification email error:', e.message); }
             }
 
-            // (2) Sajeeb — internal staff subject (same body).
+            // (2) Jahirul + Sajeeb — internal staff subject (same body).
             try {
               const staffSubject = `New Player Registration — ${playerName || 'Player'} with Coach ${coachFullName || 'Unknown'} (${teamName || 'Unknown Team'})`;
               await sendPaymentNotificationEmail({
                 ...tablePayload,
                 subject:    staffSubject,
-                recipients: 'sajeeb@appsus.io',
+                recipients: 'jahirul@appsus.io, mark@markhelsel.com',
               });
             } catch (e) { console.error('⚠️  Staff notification email error:', e.message); }
 
@@ -832,13 +832,13 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
             } catch (e) { console.error('⚠️  Coach tryout email error (paid, coach):', e.message); }
           }
 
-          // (2) Sajeeb — detailed subject
+          // (2) Mark — detailed subject
           try {
             const markSubject = `New Tryout Registration — ${playerName || 'Player'} with Coach ${coachFullName || 'Unknown'} (${teamName || 'Unknown Team'})`;
             await sendCoachTryoutNotificationEmail({
               ...tryoutPayload,
               subject:    markSubject,
-              recipients: 'sajeeb@appsus.io',
+              recipients: 'mark@markhelsel.com',
             });
           } catch (e) { console.error('⚠️  Coach tryout email error (paid, mark):', e.message); }
         }
@@ -3609,13 +3609,13 @@ app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
       } catch (e) { console.error('⚠️  Coach tryout email error (free, coach):', e.message); }
     }
 
-    // (2) Sajeeb — detailed subject
+    // (2) Mark — detailed subject
     try {
       const markSubject = `New Tryout Registration — ${playerName || 'Player'} with Coach ${coachFullName || 'Unknown'} (${teamName || 'Unknown Team'})`;
       await sendCoachTryoutNotificationEmail({
         ...tryoutPayload,
         subject:    markSubject,
-        recipients: 'sajeeb@appsus.io',
+        recipients: 'mark@markhelsel.com',
       });
     } catch (e) { console.error('⚠️  Coach tryout email error (free, mark):', e.message); }
 
