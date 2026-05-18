@@ -25,20 +25,23 @@ function createTransporter() {
   });
 }
 
-// ── RESET PASSWORD OTP EMAIL (only email send retained) ───────
-async function sendOTPEmail(toEmail, otp) {
+async function sendOTPEmail(toEmail, otp, purpose) {
   if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
     console.warn('⚠️  EMAIL_USER / EMAIL_PASS not set — skipping email send. OTP:', otp);
     return;
   }
-  const subject = 'Ambassadors Baseball – Password Reset Code';
+  const subject = purpose === 'reset'
+    ? 'Ambassadors Baseball – Password Reset Code'
+    : 'Ambassadors Baseball – Verify Your Identity';
   const html = `
     <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:24px;border:1px solid #dce3ec;border-radius:8px">
       <div style="background:#0a1628;padding:16px 20px;border-radius:6px 6px 0 0;margin:-24px -24px 24px">
         <h2 style="color:#fff;margin:0;font-size:1.1rem;letter-spacing:.05em;text-transform:uppercase">Ambassadors Baseball</h2>
       </div>
       <p style="color:#1a1a2e;font-size:.95rem;margin-bottom:8px">
-        You requested a password reset. Use the code below to set a new password:
+        ${purpose === 'reset'
+          ? 'You requested a password reset. Use the code below to set a new password:'
+          : 'Use the code below to verify your identity and change your password:'}
       </p>
       <div style="text-align:center;margin:24px 0">
         <span style="display:inline-block;background:#f4f6f9;border:2px dashed #c8102e;border-radius:8px;padding:14px 32px;font-size:2rem;font-weight:700;letter-spacing:.35em;color:#0a1628;font-family:monospace">${otp}</span>
@@ -57,8 +60,379 @@ function generateOTP() {
   return String(Math.floor(100000 + crypto.randomInt(900000))).padStart(6, '0');
 }
 
+// ── PAYMENT NOTIFICATION EMAIL ────────────────────────────────
+// Used for the staff-facing notifications (Coach / Jahirul / Sajeeb).
+// `subject` and `recipients` are passed in so the same body can be sent
+// with different subjects to different audiences (coach gets one subject,
+// internal staff gets a different one).
+async function sendPaymentNotificationEmail({ subject, recipients, playerName, paymentType, amountPaid, totalFee, balance, status, playerEmail, playerCell, coachName, teamName }) {
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    console.warn('⚠️  EMAIL_USER / EMAIL_PASS not set — skipping payment notification email');
+    return;
+  }
+  if (!recipients) {
+    console.warn('⚠️  No recipients for payment notification — skipping');
+    return;
+  }
+  const fmt = n => '$' + (parseFloat(n) || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const typeLabel = { full: 'Full Payment', deposit: 'Deposit', remainder: 'Remaining Balance', installment: 'Installment' }[paymentType] || paymentType;
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;border:1px solid #dce3ec;border-radius:8px">
+      <div style="background:#0a1628;padding:16px 20px;border-radius:6px 6px 0 0;margin:-24px -24px 24px">
+        <h2 style="color:#fff;margin:0;font-size:1.1rem;letter-spacing:.05em;text-transform:uppercase">Ambassadors Baseball — Payment Received</h2>
+      </div>
+      <p style="color:#1a1a2e;font-size:.95rem;margin-bottom:20px">A payment has been successfully processed.</p>
+      <table style="width:100%;border-collapse:collapse;font-size:.9rem;margin-bottom:20px">
+        <tr style="background:#f4f6f9"><td style="padding:9px 12px;color:#5a6a7a;width:40%">Player Name</td><td style="padding:9px 12px;color:#0a1628;font-weight:700">${playerName || '—'}</td></tr>
+        <tr><td style="padding:9px 12px;color:#5a6a7a">Team</td><td style="padding:9px 12px;color:#0a1628">${teamName || '—'}</td></tr>
+        <tr style="background:#f4f6f9"><td style="padding:9px 12px;color:#5a6a7a">Coach Name</td><td style="padding:9px 12px;color:#0a1628">${coachName || '—'}</td></tr>
+        <tr><td style="padding:9px 12px;color:#5a6a7a">Player Email</td><td style="padding:9px 12px;color:#0a1628">${playerEmail || '—'}</td></tr>
+        <tr style="background:#f4f6f9"><td style="padding:9px 12px;color:#5a6a7a">Player Cell</td><td style="padding:9px 12px;color:#0a1628">${playerCell || '—'}</td></tr>
+        <tr><td style="padding:9px 12px;color:#5a6a7a">Payment Type</td><td style="padding:9px 12px;color:#0a1628">${typeLabel}</td></tr>
+        <tr style="background:#f4f6f9"><td style="padding:9px 12px;color:#5a6a7a">Amount Paid</td><td style="padding:9px 12px;color:#2d7a2d;font-weight:700">${fmt(amountPaid)}</td></tr>
+        <tr><td style="padding:9px 12px;color:#5a6a7a">Total Fee</td><td style="padding:9px 12px;color:#0a1628">${fmt(totalFee)}</td></tr>
+        <tr style="background:#f4f6f9"><td style="padding:9px 12px;color:#5a6a7a">Remaining Balance</td><td style="padding:9px 12px;color:${parseFloat(balance) > 0 ? '#c8102e' : '#2d7a2d'};font-weight:700">${fmt(balance)}</td></tr>
+        <tr><td style="padding:9px 12px;color:#5a6a7a">Status</td><td style="padding:9px 12px;color:#0a1628;font-weight:700">${status || '—'}</td></tr>
+      </table>
+      <p style="color:#5a6a7a;font-size:.8rem;margin:0">This is an automated notification from Ambassadors Baseball.</p>
+    </div>`;
+  try {
+    await createTransporter().sendMail({
+      from: `"Ambassadors Baseball" <${process.env.EMAIL_USER}>`,
+      to: recipients,
+      subject,
+      html,
+    });
+    console.log(`📧  Payment notification email sent — to=${recipients} subject="${subject}"`);
+  } catch (err) {
+    console.error('⚠️  Failed to send payment notification email:', err.message);
+  }
+}
+
+// ── PLAYER WELCOME EMAIL ──────────────────────────────────────
+// Sent to the player on every successful payment that triggers the notification flow.
+// Subject: "Welcome to Ambassadors Baseball"
+async function sendPlayerWelcomeEmail({ playerEmail, playerName }) {
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    console.warn('⚠️  EMAIL_USER / EMAIL_PASS not set — skipping player welcome email');
+    return;
+  }
+  if (!playerEmail) {
+    console.log('ℹ️  No player email on file — skipping player welcome email');
+    return;
+  }
+  // First name: take the first whitespace-delimited token of the full name.
+  const firstName = (playerName || '').trim().split(/\s+/)[0] || 'Player';
+
+  // Plain-text body (preserves the exact wording supplied).
+  const text =
+`Hello ${firstName},
+
+Welcome to Ambassadors Baseball!
+
+Congratulations on becoming part of a program built on faith, hard work, accountability, development, and excellence. We are excited to have you with us and can't wait to begin this journey together.
+
+This is a big opportunity.
+
+If you fully commit yourself to the process — as a player, teammate, leader, and young man — this experience can truly become a major stepping stone in both your baseball career and your life.
+
+At Ambassadors Baseball, we believe God has a purpose and plan for every player. Our job is to trust Him, work hard, stay grateful, and give our best effort every single day.
+
+Now that you are officially registered, there are a couple important "next step" items you need to complete as soon as possible:
+
+1. Join The HUB
+The HUB is where players receive important updates, communication, schedules, training information, and announcements.
+https://portal.theambassadorsgroup.com
+
+2. Complete Your VTS (Video Training Series)
+The VTS will introduce you to the Ambassadors culture, standards, expectations, and mindset.
+This is an important part of becoming an Ambassadors player and should be completed promptly.
+You will find the Training Course in the Hub when you set up your new account.
+
+Most importantly, take pride in being part of Ambassadors Baseball. Represent your family, your teammates, and your faith the right way both on and off the field.
+
+Be coachable. Be accountable. Be grateful. Compete hard. Trust God's plan.
+
+We're excited to get started.
+
+Welcome to the family!
+
+Mark Helsel
+"Coach Mark"
+Founder, Ambassadors Baseball`;
+
+  // HTML version — same content, light formatting.
+  // A per-send invisible token prevents Gmail from collapsing similar messages
+  // ("…" trim quoted content). Zero visual impact; only affects email-client dedup.
+  const _uniq = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  const html = `
+    <div style="background:#ffffff;padding:0;margin:0;">
+      <div style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:0;line-height:0;color:transparent;opacity:0;visibility:hidden;">${_uniq}</div>
+      <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;max-width:620px;margin:0 auto;background:#ffffff;color:#1a1a2e;line-height:1.7;font-size:15px;">
+
+        <!-- Banner -->
+        <div style="background:#0a1628;padding:28px 32px;text-align:center;border-bottom:3px solid #c8102e;">
+          <h1 style="color:#ffffff;margin:0;font-size:18px;letter-spacing:0.18em;text-transform:uppercase;font-weight:700;">Ambassadors Baseball</h1>
+          <p style="color:#a8b5c4;margin:8px 0 0;font-size:11px;letter-spacing:0.2em;text-transform:uppercase;">Welcome to the Family</p>
+        </div>
+
+        <!-- Body -->
+        <div style="padding:36px 32px;background:#ffffff;">
+          <p style="margin:0 0 18px;">Hello <strong>${firstName}</strong>,</p>
+          <p style="margin:0 0 18px;font-size:17px;color:#0a1628;"><strong>Welcome to Ambassadors Baseball!</strong></p>
+          <p style="margin:0 0 18px;">Congratulations on becoming part of a program built on faith, hard work, accountability, development, and excellence. We are excited to have you with us and can't wait to begin this journey together.</p>
+          <p style="margin:0 0 18px;font-weight:700;color:#0a1628;">This is a big opportunity.</p>
+          <p style="margin:0 0 18px;">If you fully commit yourself to the process — as a player, teammate, leader, and young man — this experience can truly become a major stepping stone in both your baseball career and your life.</p>
+          <p style="margin:0 0 18px;">At Ambassadors Baseball, we believe God has a purpose and plan for every player. Our job is to trust Him, work hard, stay grateful, and give our best effort every single day.</p>
+          <p style="margin:0 0 18px;">Now that you are officially registered, there are a couple important "next step" items you need to complete as soon as possible:</p>
+
+          <!-- Numbered next-step list -->
+          <ol style="padding-left:24px;margin:0 0 22px;">
+            <li style="margin-bottom:18px;padding-left:6px;">
+              <strong style="color:#0a1628;font-size:16px;">Join The HUB</strong><br/>
+              <span>The HUB is where players receive important updates, communication, schedules, training information, and announcements.</span><br/>
+              <em style="color:#5a6a7a;font-style:normal;"><a href="https://portal.theambassadorsgroup.com" style="color:#c8102e;text-decoration:underline;font-weight:600;">Click here</a></em>
+            </li>
+            <li style="padding-left:6px;">
+              <strong style="color:#0a1628;font-size:16px;">Complete Your VTS (Video Training Series)</strong><br/>
+              <span>The VTS will introduce you to the Ambassadors culture, standards, expectations, and mindset. This is an important part of becoming an Ambassadors player and should be completed promptly.</span><br/>
+              <span>You will find the Training Course in the Hub when you set up your new account.</span>
+            </li>
+          </ol>
+
+          <p style="margin:0 0 18px;">Most importantly, take pride in being part of Ambassadors Baseball. Represent your family, your teammates, and your faith the right way both on and off the field.</p>
+
+          <!-- Callout: key motto -->
+          <p style="margin:24px 0;padding:16px 22px;border-left:3px solid #c8102e;background:#f8f9fb;font-weight:700;color:#0a1628;">Be coachable. Be accountable. Be grateful. Compete hard. Trust God's plan.</p>
+
+          <p style="margin:0 0 18px;">We're excited to get started.</p>
+          <p style="margin:24px 0 0;font-size:17px;font-weight:700;color:#0a1628;">Welcome to the family!</p>
+
+          <!-- Signature -->
+          <div style="margin-top:32px;padding-top:24px;border-top:1px solid #e3e8ef;">
+            <p style="margin:0 0 4px;font-size:18px;font-weight:700;color:#0a1628;">Mark Helsel</p>
+            <p style="margin:0 0 10px;color:#5a6a7a;font-style:italic;font-size:14px;">"Coach Mark"</p>
+            <p style="margin:0;color:#0a1628;font-weight:600;font-size:14px;">Founder, Ambassadors Baseball</p>
+          </div>
+        </div>
+
+      </div>
+    </div>`;
+
+  try {
+    await createTransporter().sendMail({
+      from: `"Ambassadors Baseball" <${process.env.EMAIL_USER}>`,
+      to: playerEmail,
+      subject: 'Welcome to Ambassadors Baseball',
+      text,
+      html,
+    });
+    console.log(`📧  Player welcome email sent — to=${playerEmail}`);
+  } catch (err) {
+    console.error('⚠️  Failed to send player welcome email:', err.message);
+  }
+}
+
+// ── PARENT WELCOME EMAIL ──────────────────────────────────────
+// Sent individually to each parent (one call per parent — mother and father each get
+// their own personalized email with their own first name in the greeting).
+async function sendParentWelcomeEmail({ parentEmail, parentFirstName, coachFullName }) {
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    console.warn('⚠️  EMAIL_USER / EMAIL_PASS not set — skipping parent welcome email');
+    return;
+  }
+  if (!parentEmail) {
+    // Silent skip — not every player has both parent emails on file.
+    return;
+  }
+  const greetingName = (parentFirstName || '').trim() || 'Parent';
+  const coachName    = (coachFullName  || '').trim() || 'your coach';
+
+  // Plain-text body (preserves the exact wording from the spec).
+  const text =
+`Dear ${greetingName},
+
+First, thank you for trusting Ambassadors Baseball with your son and your family. I know you had many options, and I want you to know that I do not take your decision lightly.
+
+For many reasons, I truly believe you made a great decision joining the Ambassadors family. Your head coach ${coachName} is an amazing man. I personally interviewed and vetted him. He is the right man to lead this team. I'm excited for you to see him in action.
+
+Our mission goes far beyond wins and losses. We are committed to building young men of character, faith, discipline, leadership, and excellence—on and off the field. We hold ourselves to a high standard because your family deserves nothing less.
+
+As the Founder and National Director of Ambassadors Baseball, I want you to hear this directly from me: the buck stops with me.
+
+That means if something is not what we said it would be… if communication breaks down… if standards are not being upheld… or if you simply need guidance, encouragement, or clarity, I want you to feel completely confident reaching out to me personally. That's why I put my personal contact information below.
+
+We are not perfect, but we are committed.
+
+We will work hard to create an environment where players are challenged, encouraged, developed, and cared for. We expect our coaches, players, and families to represent Ambassadors with integrity and respect at all times. Protecting that culture is incredibly important to me.
+
+Most importantly, I want you to know that you are not alone on this journey. Youth sports can be exciting, emotional, rewarding, and sometimes difficult. My goal is to help support your family through all of it.
+
+Thank you again for believing in what we are building together.
+
+I'm excited for the journey ahead. You will be receiving a series of emails from us. Each email contains very important information so please take care to read each one.
+
+With gratitude,
+Mark Helsel aka "Coach Mark"
+Founder, Ambassadors Baseball
+Email: mark@markhelsel.com
+Phone: 814-502-9799`;
+
+  // HTML version — same content, light formatting.
+  const html = `
+    <div style="background:#ffffff;padding:0;margin:0;">
+      <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;max-width:620px;margin:0 auto;background:#ffffff;color:#1a1a2e;line-height:1.75;font-size:15px;">
+
+        <!-- Banner -->
+        <div style="background:#0a1628;padding:28px 32px;text-align:center;border-bottom:3px solid #c8102e;">
+          <h1 style="color:#ffffff;margin:0;font-size:18px;letter-spacing:0.18em;text-transform:uppercase;font-weight:700;">Ambassadors Baseball</h1>
+          <p style="color:#a8b5c4;margin:8px 0 0;font-size:11px;letter-spacing:0.2em;text-transform:uppercase;">A Letter from the Founder</p>
+        </div>
+
+        <!-- Body -->
+        <div style="padding:40px 36px;background:#ffffff;">
+          <p style="margin:0 0 20px;">Dear <strong>${greetingName}</strong>,</p>
+
+          <p style="margin:0 0 20px;">First, thank you for trusting Ambassadors Baseball with your son and your family. I know you had many options, and I want you to know that I do not take your decision lightly.</p>
+
+          <p style="margin:0 0 20px;">For many reasons, I truly believe you made a great decision joining the Ambassadors family. Your head coach <strong style="color:#0a1628;">${coachName}</strong> is an amazing man. I personally interviewed and vetted him. He is the right man to lead this team. I'm excited for you to see him in action.</p>
+
+          <p style="margin:0 0 20px;">Our mission goes far beyond wins and losses. We are committed to building young men of character, faith, discipline, leadership, and excellence—on and off the field. We hold ourselves to a high standard because your family deserves nothing less.</p>
+
+          <p style="margin:0 0 20px;">As the Founder and National Director of Ambassadors Baseball, I want you to hear this directly from me: <strong style="color:#0a1628;">the buck stops with me.</strong></p>
+
+          <p style="margin:0 0 20px;">That means if something is not what we said it would be… if communication breaks down… if standards are not being upheld… or if you simply need guidance, encouragement, or clarity, I want you to feel completely confident reaching out to me personally. That's why I put my personal contact information below.</p>
+
+          <!-- Callout: mission statement -->
+          <p style="margin:24px 0;padding:14px 22px;border-left:3px solid #c8102e;background:#f8f9fb;font-style:italic;color:#0a1628;font-size:16px;">We are not perfect, but we are committed.</p>
+
+          <p style="margin:0 0 20px;">We will work hard to create an environment where players are challenged, encouraged, developed, and cared for. We expect our coaches, players, and families to represent Ambassadors with integrity and respect at all times. Protecting that culture is incredibly important to me.</p>
+
+          <p style="margin:0 0 20px;">Most importantly, I want you to know that you are not alone on this journey. Youth sports can be exciting, emotional, rewarding, and sometimes difficult. My goal is to help support your family through all of it.</p>
+
+          <p style="margin:0 0 20px;">Thank you again for believing in what we are building together.</p>
+
+          <p style="margin:0 0 30px;">I'm excited for the journey ahead. You will be receiving a series of emails from us. Each email contains very important information so please take care to read each one.</p>
+
+          <!-- Signature -->
+          <div style="margin-top:32px;padding-top:24px;border-top:1px solid #e3e8ef;">
+            <p style="margin:0 0 6px;color:#5a6a7a;">With gratitude,</p>
+            <p style="margin:0 0 4px;font-size:18px;font-weight:700;color:#0a1628;">Mark Helsel</p>
+            <p style="margin:0 0 10px;color:#5a6a7a;font-style:italic;font-size:14px;">aka "Coach Mark"</p>
+            <p style="margin:0 0 14px;color:#0a1628;font-weight:600;font-size:14px;">Founder, Ambassadors Baseball</p>
+            <p style="margin:0;font-size:14px;color:#5a6a7a;">
+              Email: <a href="mailto:mark@markhelsel.com" style="color:#c8102e;text-decoration:none;font-weight:600;">mark@markhelsel.com</a>
+              <span style="margin:0 10px;color:#dce3ec;">|</span>
+              Phone: <a href="tel:8145029799" style="color:#5a6a7a;text-decoration:none;">814-502-9799</a>
+            </p>
+          </div>
+
+        </div>
+      </div>
+    </div>`;
+
+  try {
+    await createTransporter().sendMail({
+      from: `"Ambassadors Baseball" <${process.env.EMAIL_USER}>`,
+      to: parentEmail,
+      subject: 'Welcome to Ambassadors Baseball',
+      text,
+      html,
+    });
+    console.log(`📧  Parent welcome email sent — to=${parentEmail} greeting="${greetingName}"`);
+  } catch (err) {
+    console.error('⚠️  Failed to send parent welcome email:', err.message);
+  }
+}
+
+// ── COACH TRYOUT NOTIFICATION EMAIL ───────────────────────────────
+// Fires on EVERY tryout registration — free or paid (paid: after Stripe confirms).
+// Body is shared between coach + Mark; `subject` and `recipients` are passed in
+// so each audience can have their own subject line (coach: short congrats;
+// Mark: detailed "with Coach X (Team Y)" format).
+async function sendCoachTryoutNotificationEmail({
+  subject, recipients,
+  coachName, teamName,
+  registrantName, registrantCell, registrantEmail,
+  playerName, age, dob, pos1, pos2, hw,
+  address, city, state, zip, tryoutDate, isPaid, amount,
+}) {
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    console.warn('⚠️  EMAIL_USER / EMAIL_PASS not set — skipping coach tryout notification email');
+    return;
+  }
+  if (!recipients) {
+    console.log('ℹ️  No recipients for coach tryout notification — skipping');
+    return;
+  }
+  const pos = [pos1, pos2].filter(Boolean).join(' / ') || '—';
+  const loc = [city, state].filter(Boolean).join(', ') || '—';
+  const statusLabel = isPaid ? 'Paid' : 'Free';
+  // Currency formatter — only used for paid tryouts. Free tryouts show "Free".
+  const fmtAmount = n => '$' + (parseFloat(n) || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const amountDisplay = isPaid ? (amount != null ? fmtAmount(amount) : '—') : 'Free';
+  const html = `
+    <div style="background:#ffffff;padding:0;margin:0;">
+      <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;max-width:620px;margin:0 auto;background:#ffffff;color:#1a1a2e;line-height:1.6;font-size:14px;">
+
+        <!-- Banner -->
+        <div style="background:#0a1628;padding:24px 32px;text-align:center;border-bottom:3px solid #c8102e;">
+          <h1 style="color:#ffffff;margin:0;font-size:17px;letter-spacing:0.16em;text-transform:uppercase;font-weight:700;">Ambassadors Baseball</h1>
+          <p style="color:#a8b5c4;margin:6px 0 0;font-size:11px;letter-spacing:0.2em;text-transform:uppercase;">New Tryout Registration</p>
+        </div>
+
+        <!-- Body -->
+        <div style="padding:30px 32px;background:#ffffff;">
+          <p style="margin:0 0 22px;font-size:15px;">A new player has just registered for your tryout.</p>
+
+          <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:20px;">
+            <tr style="background:#f4f6f9;"><td style="padding:9px 12px;color:#5a6a7a;width:42%;">Team</td><td style="padding:9px 12px;color:#0a1628;font-weight:700;">${teamName || '—'}</td></tr>
+            <tr><td style="padding:9px 12px;color:#5a6a7a;">Coach Name</td><td style="padding:9px 12px;color:#0a1628;">${coachName || '—'}</td></tr>
+            <tr style="background:#f4f6f9;"><td style="padding:9px 12px;color:#5a6a7a;">Tryout Date</td><td style="padding:9px 12px;color:#0a1628;font-weight:700;">${tryoutDate || '—'}</td></tr>
+            <tr><td style="padding:9px 12px;color:#5a6a7a;">Registration Type</td><td style="padding:9px 12px;color:${isPaid ? '#2d7a2d' : '#0a1628'};font-weight:700;">${statusLabel}</td></tr>
+            <tr style="background:#f4f6f9;"><td style="padding:9px 12px;color:#5a6a7a;">Amount</td><td style="padding:9px 12px;color:${isPaid ? '#2d7a2d' : '#0a1628'};font-weight:700;">${amountDisplay}</td></tr>
+          </table>
+
+          <h3 style="margin:24px 0 10px;font-size:13px;color:#5a6a7a;text-transform:uppercase;letter-spacing:0.08em;">Player</h3>
+          <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:20px;">
+            <tr style="background:#f4f6f9;"><td style="padding:9px 12px;color:#5a6a7a;width:42%;">Player Name</td><td style="padding:9px 12px;color:#0a1628;font-weight:700;">${playerName || '—'}</td></tr>
+            <tr><td style="padding:9px 12px;color:#5a6a7a;">Age</td><td style="padding:9px 12px;color:#0a1628;">${age || '—'}</td></tr>
+            <tr style="background:#f4f6f9;"><td style="padding:9px 12px;color:#5a6a7a;">Date of Birth</td><td style="padding:9px 12px;color:#0a1628;">${dob || '—'}</td></tr>
+            <tr><td style="padding:9px 12px;color:#5a6a7a;">Height / Weight</td><td style="padding:9px 12px;color:#0a1628;">${hw || '—'}</td></tr>
+            <tr style="background:#f4f6f9;"><td style="padding:9px 12px;color:#5a6a7a;">Positions</td><td style="padding:9px 12px;color:#0a1628;">${pos}</td></tr>
+          </table>
+
+          <h3 style="margin:24px 0 10px;font-size:13px;color:#5a6a7a;text-transform:uppercase;letter-spacing:0.08em;">Registered By</h3>
+          <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:8px;">
+            <tr style="background:#f4f6f9;"><td style="padding:9px 12px;color:#5a6a7a;width:42%;">Name</td><td style="padding:9px 12px;color:#0a1628;font-weight:700;">${registrantName || '—'}</td></tr>
+            <tr><td style="padding:9px 12px;color:#5a6a7a;">Phone</td><td style="padding:9px 12px;color:#0a1628;">${registrantCell || '—'}</td></tr>
+            <tr style="background:#f4f6f9;"><td style="padding:9px 12px;color:#5a6a7a;">Email</td><td style="padding:9px 12px;color:#0a1628;">${registrantEmail || '—'}</td></tr>
+            <tr><td style="padding:9px 12px;color:#5a6a7a;">Address</td><td style="padding:9px 12px;color:#0a1628;">${address || '—'}</td></tr>
+            <tr style="background:#f4f6f9;"><td style="padding:9px 12px;color:#5a6a7a;">Location</td><td style="padding:9px 12px;color:#0a1628;">${loc}</td></tr>
+            <tr><td style="padding:9px 12px;color:#5a6a7a;">Zip</td><td style="padding:9px 12px;color:#0a1628;">${zip || '—'}</td></tr>
+          </table>
+
+          <p style="color:#5a6a7a;font-size:12px;margin:24px 0 0;">This is an automated notification from Ambassadors Baseball.</p>
+        </div>
+      </div>
+    </div>`;
+  try {
+    await createTransporter().sendMail({
+      from: `"Ambassadors Baseball" <${process.env.EMAIL_USER}>`,
+      to: recipients,
+      subject,
+      html,
+    });
+    console.log(`📧  Coach tryout notification email sent — to=${recipients} player="${playerName}" subject="${subject}"`);
+  } catch (err) {
+    console.error('⚠️  Failed to send coach tryout notification email:', err.message);
+  }
+}
+
 // ── ENV VALIDATION ────────────────────────────────────────────────
 const REQUIRED_ENV = ['MONGODB_URI', 'JWT_SECRET'];
+// GHL_API_KEY / GHL_LOCATION_ID are optional — used only for contact upserts
+// STRIPE_SECRET_KEY is optional — needed for checkout but not fatal at startup
 const missingEnv = REQUIRED_ENV.filter(k => !process.env[k]);
 if (missingEnv.length) {
   console.error('❌  Missing required environment variables:', missingEnv.join(', '));
@@ -93,6 +467,9 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     const amountPaid = session.amount_total / 100; // cents → dollars
 
     // ── Installment subscription: set cancel_at_period_end as a safety net ─
+    // We primarily cancel via totalMonths count in invoice.payment_succeeded.
+    // cancel_at_period_end is a backup in case the final webhook is missed —
+    // it cancels cleanly at the end of the last billing period, no proration.
     if (paymentType === 'installment' && session.subscription && stripe) {
       try {
         const totalMonths = parseInt(session.metadata?.totalMonths || '0', 10);
@@ -105,6 +482,9 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     }
 
     // ── PENDING REGISTRATION → materialize Player + PlayerPayment ─────────
+    // If this checkout came from a pre-payment registration form, no Player or
+    // PlayerPayment exists yet. Create them now, push to GHL, then continue
+    // into the existing PlayerPayment update flow with the freshly-minted id.
     if (pendingId && !playerPaymentId) {
       try {
         const pending = await PendingRegistration.findById(pendingId).lean();
@@ -145,7 +525,8 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
           });
           console.log(`✅  [WEBHOOK] Player created — playerId=${player._id}`);
 
-          // 2. Create the PlayerPayment record
+          // 2. Create the PlayerPayment record (status: Pending — the rest of the
+          // webhook flow below will flip it to Paid/Partial with the real amount).
           const playerPayment = await PlayerPayment.create({
             coach_id:         pending.coach_id,
             player_id:        player._id,
@@ -162,7 +543,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
           });
           console.log(`✅  [WEBHOOK] PlayerPayment created — playerPaymentId=${playerPayment._id}`);
 
-          // 3. Push to GHL (best-effort)
+          // 3. Push to GHL (best-effort — never blocks the materialization).
           try {
             await upsertGHLPlayer({
               name:        p.name,
@@ -193,10 +574,14 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
               teamName:    pending.team_name || '',
             });
           } catch (ghlErr) {
+            // Already logged inside upsertGHLPlayer; swallow so DB stays consistent.
             console.error('⚠️  [WEBHOOK] GHL push failed but DB records created:', ghlErr.message);
           }
 
-          // 4. For installments: backfill playerPaymentId onto the Stripe subscription metadata
+          // 4. For installments: backfill playerPaymentId onto the Stripe subscription
+          // metadata so subsequent invoice.payment_succeeded webhooks can find the
+          // PlayerPayment row. Without this, only the first installment would be
+          // recorded — every recurring charge would be silently lost in the DB.
           if (paymentType === 'installment' && session.subscription && stripe) {
             try {
               const existingSub = await stripe.subscriptions.retrieve(session.subscription);
@@ -209,10 +594,12 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
               console.log(`🔗  [WEBHOOK] Subscription ${session.subscription} metadata backfilled with playerPaymentId=${playerPayment._id}`);
             } catch (metaErr) {
               console.error('⚠️  [WEBHOOK] Failed to backfill subscription metadata:', metaErr.message);
+              // Non-fatal — first payment still recorded below via session metadata.
+              // Recurring charges would need manual reconciliation if this fails.
             }
           }
 
-          // 5. Delete the pending row
+          // 5. Delete the pending row — we no longer need it.
           await PendingRegistration.findByIdAndDelete(pendingId);
           console.log(`🗑️   [WEBHOOK] PendingRegistration ${pendingId} deleted`);
 
@@ -221,6 +608,8 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
         }
       } catch (matErr) {
         console.error('❌  [WEBHOOK] Materialization error:', matErr.message);
+        // Return 500 so Stripe retries automatically (up to 17 times over 3 days).
+        // The pending row is preserved (we didn't delete it) so each retry is safe.
         return res.status(500).send('Materialization failed — will retry');
       }
     }
@@ -258,6 +647,95 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 
           await PlayerPayment.findByIdAndUpdate(playerPaymentId, update);
           console.log(`✅  Stripe payment recorded — playerPaymentId=${playerPaymentId} type=${paymentType}`);
+
+          // ── Send payment notification emails ──────────────────
+          // 1) Coach — table notification, congratulations subject
+          // 2) Jahirul + Sajeeb — same table body, internal staff subject
+          // 3) Player — welcome letter
+          // 4) Father / Mother — separate personalized welcome letter (one each)
+          //
+          // Each send is wrapped in its own try/catch so a failure on one
+          // recipient never blocks the others or the rest of the webhook.
+          try {
+            const updatedPmt = await PlayerPayment.findById(playerPaymentId);
+            const playerRec  = updatedPmt?.player_id
+              ? await Player.findById(updatedPmt.player_id).select('name email cell father_first father_email mother_first mother_email')
+              : null;
+            const coachRec   = updatedPmt?.coach_id
+              ? await Coach.findById(updatedPmt.coach_id).select('first_name last_name team_name email')
+              : null;
+
+            const coachFullName = coachRec ? `${coachRec.first_name || ''} ${coachRec.last_name || ''}`.trim() : '';
+            const teamName      = coachRec?.team_name || '';
+            const playerName    = updatedPmt?.player_name || playerRec?.name || '';
+
+            // Shared payload for the staff/coach table emails.
+            const tablePayload = {
+              playerName,
+              paymentType,
+              amountPaid:  updatedPmt?.amount_paid ?? 0,
+              totalFee:    updatedPmt?.total_fee   ?? 0,
+              balance:     updatedPmt?.balance     ?? 0,
+              status:      updatedPmt?.status      || '',
+              playerEmail: playerRec?.email        || '',
+              playerCell:  playerRec?.cell         || '',
+              coachName:   coachFullName,
+              teamName,
+            };
+
+            // (1) Coach notification — congratulations subject.
+            if (coachRec?.email) {
+              try {
+                await sendPaymentNotificationEmail({
+                  ...tablePayload,
+                  subject:    'Congratulations! Another player has accepted your invitation and has registered for your team.',
+                  recipients: coachRec.email,
+                });
+              } catch (e) { console.error('⚠️  Coach notification email error:', e.message); }
+            }
+
+            // (2) Sajeeb — internal staff subject (same body).
+            try {
+              const staffSubject = `New Player Registration — ${playerName || 'Player'} with Coach ${coachFullName || 'Unknown'} (${teamName || 'Unknown Team'})`;
+              await sendPaymentNotificationEmail({
+                ...tablePayload,
+                subject:    staffSubject,
+                recipients: 'sajeeb@appsus.io',
+              });
+            } catch (e) { console.error('⚠️  Staff notification email error:', e.message); }
+
+            // (3) Player welcome email.
+            if (playerRec?.email) {
+              try {
+                await sendPlayerWelcomeEmail({
+                  playerEmail: playerRec.email,
+                  playerName,
+                });
+              } catch (e) { console.error('⚠️  Player welcome email error:', e.message); }
+            }
+
+            // (4) Parent welcome emails — one per parent, individually addressed.
+            if (playerRec?.father_email) {
+              try {
+                await sendParentWelcomeEmail({
+                  parentEmail:     playerRec.father_email,
+                  parentFirstName: playerRec.father_first || '',
+                  coachFullName,
+                });
+              } catch (e) { console.error('⚠️  Father welcome email error:', e.message); }
+            }
+            if (playerRec?.mother_email) {
+              try {
+                await sendParentWelcomeEmail({
+                  parentEmail:     playerRec.mother_email,
+                  parentFirstName: playerRec.mother_first || '',
+                  coachFullName,
+                });
+              } catch (e) { console.error('⚠️  Mother welcome email error:', e.message); }
+            }
+          } catch (emailErr) {
+            console.error('⚠️  Payment notification email block error (checkout):', emailErr.message);
+          }
         }
       } catch (dbErr) {
         console.error('❌  Failed to update PlayerPayment after Stripe webhook:', dbErr.message);
@@ -268,6 +746,9 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     if (paymentType === 'tryout') {
       const { registrationId } = session.metadata || {};
       if (registrationId) {
+        // Flip status to 'confirmed' and capture the updated doc in one query.
+        // Once status='confirmed', the partial TTL index no longer matches this
+        // document — it's now permanent and will not be auto-deleted.
         let confirmedReg = null;
         try {
           confirmedReg = await TryoutRegistration.findByIdAndUpdate(
@@ -282,6 +763,8 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 
         if (confirmedReg) {
           // ── GHL upsert (paid tryout) ──────────────────────────────────
+          // Only runs after payment is confirmed. Abandoned checkouts never
+          // reach the webhook → GHL stays clean of failed registrations.
           try {
             await upsertGHLContact({
               completedBy: confirmedReg.completed_by,
@@ -304,16 +787,74 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
           } catch (ghlErr) {
             console.error('⚠️  GHL upsert error (paid tryout):', ghlErr.message);
           }
+
+          // ── Notify coach + Mark (paid tryout) ─────────────────────────
+          // Two sends, same body, different subjects:
+          //   1) Coach: short congrats subject (only if they have an email)
+          //   2) Mark:  detailed subject with player + coach + team
+          // Each send wrapped in its own try/catch so one failure never blocks the other.
+          const coachRec = await Coach.findById(confirmedReg.coach_id).select('first_name last_name team_name email').catch(() => null);
+          const coachFullName = coachRec ? `${coachRec.first_name || ''} ${coachRec.last_name || ''}`.trim() : '';
+          const teamName      = coachRec?.team_name || '';
+          const playerName    = confirmedReg.player_name || '';
+
+          const tryoutPayload = {
+            coachName:       coachFullName,
+            teamName,
+            registrantName:  confirmedReg.name,
+            registrantCell:  confirmedReg.cell,
+            registrantEmail: confirmedReg.email,
+            playerName,
+            age:             confirmedReg.age,
+            dob:             confirmedReg.dob,
+            pos1:            confirmedReg.pos1,
+            pos2:            confirmedReg.pos2,
+            hw:              confirmedReg.hw,
+            address:         confirmedReg.address,
+            city:            confirmedReg.city,
+            state:           confirmedReg.state,
+            zip:             confirmedReg.zip,
+            tryoutDate:      confirmedReg.tryout_date,
+            isPaid:          true,
+            // Actual amount paid (Stripe cents → dollars). Reflects what was
+            // really charged in case the coach changed the price mid-flight.
+            amount:          (session.amount_total || 0) / 100,
+          };
+
+          // (1) Coach — short congrats subject
+          if (coachRec?.email) {
+            try {
+              await sendCoachTryoutNotificationEmail({
+                ...tryoutPayload,
+                subject:    'Congratulations! A new player has registered for your tryout.',
+                recipients: coachRec.email,
+              });
+            } catch (e) { console.error('⚠️  Coach tryout email error (paid, coach):', e.message); }
+          }
+
+          // (2) Sajeeb — detailed subject
+          try {
+            const markSubject = `New Tryout Registration — ${playerName || 'Player'} with Coach ${coachFullName || 'Unknown'} (${teamName || 'Unknown Team'})`;
+            await sendCoachTryoutNotificationEmail({
+              ...tryoutPayload,
+              subject:    markSubject,
+              recipients: 'sajeeb@appsus.io',
+            });
+          } catch (e) { console.error('⚠️  Coach tryout email error (paid, mark):', e.message); }
         }
       }
     }
   }
 
   // ── Monthly installment payment succeeded ─────────────────────────────────
+  // Handles both old API (invoice.payment_succeeded) and new API (invoice_payment.paid)
+  // invoice_payment.paid was introduced in Stripe API version 2026-02-25
   if (event.type === 'invoice.payment_succeeded' || event.type === 'invoice_payment.paid') {
     const isNewFormat = event.type === 'invoice_payment.paid';
     const rawObj      = event.data.object;
 
+    // invoice_payment.paid has a different shape — fetch the parent invoice
+    // to get billing_reason and subscription ID
     let invoice;
     if (isNewFormat) {
       try {
@@ -328,6 +869,9 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
       console.log(`🔔  invoice.payment_succeeded — billing_reason=${invoice.billing_reason} amount=${invoice.amount_paid} sub=${invoice.subscription}`);
     }
 
+    // ── Extract subscription ID — location changed in Stripe API 2026-02-25 ──
+    // Old API: invoice.subscription
+    // New API: invoice.parent.subscription_details.subscription
     const subId = invoice.subscription
       || invoice?.parent?.subscription_details?.subscription
       || invoice?.parent?.subscription
@@ -368,10 +912,18 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
               const paidSoFar        = existing.amount_paid || 0;
               const installmentsPaid = (existing.installments_paid || 0) + 1;
 
+              // ── Determine if this is the final payment ────────────────────
+              // We use the totalMonths count stored in subscription metadata.
+              // This is more reliable than comparing dollar amounts because
+              // integer division always leaves a fractional cent gap that would
+              // cause the last invoice to show a prorated/partial amount.
+              // When it IS the last payment we zero the balance exactly —
+              // the player is fully settled regardless of cent-level rounding.
               const isLastPayment = totalMonths > 0 && installmentsPaid >= totalMonths;
 
               let newAmountPaid, newBalance;
               if (isLastPayment) {
+                // Last payment by count — zero out exactly regardless of rounding
                 newAmountPaid = totalFee;
                 newBalance    = 0;
                 console.log(`🏁  Final installment ${installmentsPaid}/${totalMonths} — zeroing balance exactly`);
@@ -379,6 +931,10 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
                 newAmountPaid = Math.min(paidSoFar + amountPaid, totalFee);
                 newBalance    = Math.max(0, totalFee - newAmountPaid);
 
+                // Penny tolerance — catches rounding gaps like $0.01 from
+                // $1000/3 = $999.99 when totalMonths is 0 (old subscriptions
+                // created before totalMonths metadata was added).
+                // If balance is $0.50 or less after payment, treat as fully paid.
                 if (newBalance > 0 && newBalance <= 0.50) {
                   console.log(`🪙  Balance ${newBalance} within penny tolerance — zeroing out`);
                   newAmountPaid = totalFee;
@@ -397,9 +953,19 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
               });
               console.log(`✅  DB updated successfully — playerPaymentId=${playerPaymentId}`);
 
+              // ── Handle second-to-last and last payment ────────────────
+              // The problem: if the last billing cycle is shorter than 30 days
+              // (e.g. registered July 10, deadline Sept 30 — last cycle is
+              // Sept 10 → Sept 30 = 20 days), Stripe prorates and charges less.
+              //
+              // Solution: after the SECOND-TO-LAST payment, cancel the subscription
+              // immediately and create a one-time invoice for the exact remaining
+              // balance. This guarantees the full amount is always collected
+              // regardless of how many days are left in the final cycle.
               const isSecondToLast = totalMonths > 1 && installmentsPaid === totalMonths - 1;
 
               if (isLastPayment || newBalance <= 0) {
+                // All done — cancel subscription cleanly
                 console.log(`🎉  All payments complete — cancelling subscription ${subId}`);
                 try {
                   await stripe.subscriptions.cancel(subId);
@@ -409,16 +975,23 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
                 }
 
               } else if (isSecondToLast && stripe) {
+                // Second-to-last payment just completed.
+                // Cancel the subscription NOW and immediately invoice the exact
+                // remaining balance as a one-time charge — this avoids any
+                // proration on the final cycle.
                 console.log(`⏭️  Second-to-last payment done — cancelling subscription and invoicing remaining balance ${newBalance}`);
                 try {
+                  // 1. Get the customer ID from the subscription
                   const sub        = await stripe.subscriptions.retrieve(subId);
                   const customerId = sub.customer;
 
+                  // 2. Cancel the subscription immediately (no more auto-charges)
                   await stripe.subscriptions.cancel(subId);
                   console.log(`🚫  Subscription ${subId} cancelled after ${installmentsPaid} payments`);
 
+                  // 3. Create a one-time invoice for the exact remaining balance
                   const remainingCents = Math.round(newBalance * 100);
-                  await stripe.invoiceItems.create({
+                  const invoiceItem = await stripe.invoiceItems.create({
                     customer:    customerId,
                     amount:      remainingCents,
                     currency:    'usd',
@@ -428,7 +1001,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 
                   const finalInvoice = await stripe.invoices.create({
                     customer:          customerId,
-                    auto_advance:      true,
+                    auto_advance:      true, // automatically charge the card on file
                     collection_method: 'charge_automatically',
                     metadata:          { playerPaymentId, paymentType: 'installment_final', coachId: subscription.metadata?.coachId || '' },
                   });
@@ -439,6 +1012,8 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 
                 } catch (finalErr) {
                   console.error(`❌  Failed to create final invoice:`, finalErr.message);
+                  // Subscription is already cancelled at this point.
+                  // The player will need to pay the remaining balance manually.
                 }
               }
             }
@@ -451,7 +1026,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     }
   }
 
-  // ── Subscription cancelled ────────────────────────────────────────────────
+  // ── Subscription cancelled (user cancelled or Stripe auto-cancelled at deadline) ──
   if (event.type === 'customer.subscription.deleted') {
     const subscription = event.data.object;
     const { playerPaymentId } = subscription.metadata || {};
@@ -461,6 +1036,8 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
         const existing = await PlayerPayment.findById(playerPaymentId);
         if (existing && existing.status !== 'Paid') {
           const balance = Math.max(0, (existing.total_fee || 0) - (existing.amount_paid || 0));
+          // Only mark Cancelled if there's still an outstanding balance.
+          // If balance is 0 the subscription ended naturally after all payments — leave as Paid.
           const status = balance > 0 ? 'Cancelled' : 'Paid';
           await PlayerPayment.findByIdAndUpdate(playerPaymentId, { status, balance });
           console.log(`🚫  Subscription ${subscription.id} ended — playerPaymentId=${playerPaymentId} status=${status} balance=${balance}`);
@@ -477,15 +1054,9 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 app.use(express.json({ limit: '10mb' }));
 
 // ── MONGODB CONNECTION ────────────────────────────────────────────
-// Cached connection for serverless environments (Vercel)
-let cachedConn = null;
-async function connectDB() {
-  if (cachedConn && mongoose.connection.readyState === 1) return cachedConn;
-  cachedConn = await mongoose.connect(process.env.MONGODB_URI);
-  console.log('✅  MongoDB connected');
-  return cachedConn;
-}
-connectDB().catch(err => console.error('❌  MongoDB connection error:', err));
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('✅  MongoDB connected'))
+  .catch(err => { console.error('❌  MongoDB connection error:', err); process.exit(1); });
 
 // ════════════════════════════════════════════════════════════════
 //  MONGOOSE SCHEMAS & MODELS
@@ -549,9 +1120,17 @@ const tryoutRegistrationSchema = new mongoose.Schema({
   pos2:         { type: String, default: '' },
   tryout_date:  { type: String, default: '' },
   status:       { type: String, default: 'confirmed' }, // 'confirmed' | 'pending_payment'
+  // For paid tryouts only: 72h auto-cleanup if payment never completes.
+  // Set when status='pending_payment' on creation. Once payment is confirmed
+  // and status flips to 'confirmed', the partial TTL index below excludes the
+  // document and it will NEVER be deleted — even after expires_at has passed.
   expires_at:   { type: Date,   default: undefined },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 tryoutRegistrationSchema.index({ coach_id: 1 });
+// Partial TTL: auto-delete abandoned 'pending_payment' rows after 72h.
+// The partialFilterExpression ensures MongoDB only considers documents where
+// status='pending_payment'. As soon as the webhook flips status to 'confirmed',
+// the document is excluded from this index and TTL can never delete it.
 tryoutRegistrationSchema.index(
   { expires_at: 1 },
   {
@@ -638,7 +1217,7 @@ const playerPaymentSchema = new mongoose.Schema({
   status:            { type: String, default: 'Pending' },
   registered_date:   { type: String, default: '' },
   payment_deadline:  { type: String, default: '' },
-  installments_paid: { type: Number, default: 0 },
+  installments_paid: { type: Number, default: 0 }, // tracks how many monthly charges have fired
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 playerPaymentSchema.index({ coach_id: 1 });
 
@@ -670,19 +1249,42 @@ const budgetSchema = new mongoose.Schema({
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 budgetSchema.index({ coach_id: 1 });
 
+// ── PENDING REGISTRATION (pre-payment holding area) ──────────────
+// Holds the registration form payload while the parent is at Stripe checkout.
+// Materialized into Player + PlayerPayment + GHL push only after the
+// checkout.session.completed webhook fires. Auto-expires after 48h via TTL.
 const pendingRegistrationSchema = new mongoose.Schema({
   coach_id:        { type: mongoose.Schema.Types.ObjectId, ref: 'Coach', required: true },
+  // Snapshot of every field the registration form may submit. Stored loosely
+  // because two frontend forms (team.html and player-registration.html) submit
+  // slightly different field sets — we accept whatever shows up.
   player_payload:  { type: Object, default: {} },
+  // Snapshot of fee/deposit at submit time — used to create PlayerPayment after checkout.
   total_fee:       { type: Number, default: 0 },
   deposit_amount:  { type: Number, default: 0 },
   payment_plan:    { type: Array,  default: [] },
   payment_deadline:{ type: String, default: '' },
   registered_date: { type: String, default: '' },
   team_name:       { type: String, default: '' },
+  // TTL — auto-delete after 48 hours from creation.
+  // 48hrs gives breathing room vs Stripe's 24hr session expiry —
+  // ensures the pending record outlives the checkout session in all cases.
   expires_at:      { type: Date,   default: () => new Date(Date.now() + 48 * 60 * 60 * 1000) },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 pendingRegistrationSchema.index({ coach_id: 1 });
+// MongoDB TTL index — documents are removed when expires_at is reached.
 pendingRegistrationSchema.index({ expires_at: 1 }, { expireAfterSeconds: 0 });
+
+// ── COACH PAYOUT (logs each payment Ambassadors Baseball makes to a coach) ──
+// totalOwedToCoach = Σ max(PlayerPayment.total_fee − $450, 0) per registered player
+// balanceToBePaid  = totalOwedToCoach − Σ CoachPayout.amount
+const coachPayoutSchema = new mongoose.Schema({
+  coach_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Coach', required: true },
+  date:     { type: Date,   required: true },
+  amount:   { type: Number, required: true },
+  notes:    { type: String, default: '' },
+}, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
+coachPayoutSchema.index({ coach_id: 1 });
 
 // ── MODELS ────────────────────────────────────────────────────────
 const Coach              = mongoose.model('Coach',              coachSchema);
@@ -694,6 +1296,7 @@ const TeamFinancials     = mongoose.model('TeamFinancials',     teamFinancialsSc
 const PlayerPayment      = mongoose.model('PlayerPayment',      playerPaymentSchema);
 const Budget             = mongoose.model('Budget',             budgetSchema);
 const PendingRegistration= mongoose.model('PendingRegistration', pendingRegistrationSchema);
+const CoachPayout        = mongoose.model('CoachPayout',        coachPayoutSchema);
 
 // ════════════════════════════════════════════════════════════════
 //  GHL HELPERS
@@ -731,15 +1334,27 @@ async function uploadImageToGHL(base64, fileName, mimeType) {
   return url;
 }
 
-// ── STRIPE PRODUCT + PRICE HELPERS ───────────────────────────
+// ── STRIPE PRODUCT + PRICE CREATION ──────────────────────────
+/**
+ * Creates a Stripe product and a price under it directly.
+ *
+ * @param {string}      name       - Display name (e.g. "Team – Full Payment ($2000)")
+ * @param {number}      amount     - Dollar amount e.g. 250 (converted to cents internally)
+ * @param {object|null} recurring  - null = one_time; { interval: 'month', intervalCount: 1 } = recurring
+ * @returns {{ productId: string, priceId: string }}
+ */
 async function createStripeProductWithPrice(name, amount, recurring = null) {
   if (!stripe) throw new Error('Stripe is not configured — set STRIPE_SECRET_KEY env var');
+
+  // ── Step 1: Create product ────────────────────────────────
   const product = await stripe.products.create({ name });
   const productId = product.id;
   console.log(`📦  Stripe product created: "${name}" → productId=${productId}`);
+
+  // ── Step 2: Create price ──────────────────────────────────
   const priceParams = {
     product:     productId,
-    unit_amount: Math.round(amount * 100),
+    unit_amount: Math.round(amount * 100), // dollars → cents
     currency:    'usd',
   };
   if (recurring) {
@@ -748,18 +1363,27 @@ async function createStripeProductWithPrice(name, amount, recurring = null) {
       interval_count: recurring.intervalCount || 1,
     };
   }
+
   const price = await stripe.prices.create(priceParams);
   const priceId = price.id;
   console.log(`💰  Stripe price created: "${name}" $${amount} → priceId=${priceId}`);
+
   return { productId, priceId };
 }
 
+/**
+ * Archives a Stripe product (and its prices) by ID. Best-effort — never throws.
+ * Stripe does not allow hard-deleting products that have prices, so we archive instead.
+ */
 async function deleteStripeProduct(productId) {
   if (!productId || !stripe) return;
   try {
+    // Unset default_price first so prices can be safely deactivated
     await stripe.products.update(productId, { default_price: '' });
+    // Deactivate all active prices
     const prices = await stripe.prices.list({ product: productId, active: true, limit: 100 });
     await Promise.all(prices.data.map(p => stripe.prices.update(p.id, { active: false })));
+    // Archive the product itself
     await stripe.products.update(productId, { active: false });
     console.log(`🗑️  Stripe product archived: ${productId}`);
   } catch (err) {
@@ -767,8 +1391,21 @@ async function deleteStripeProduct(productId) {
   }
 }
 
+/**
+ * Updates the price on an existing Stripe product when only the fee changes.
+ * Deactivates the old price, creates a new price under the same product,
+ * sets the new price as default on the product, and returns the new priceId.
+ * Product ID stays the same — no archiving or recreation.
+ *
+ * @param {string}      productId  - Existing Stripe product ID to update
+ * @param {number}      amount     - New dollar amount
+ * @param {object|null} recurring  - null = one_time; recurring object = subscription
+ * @returns {string} new priceId
+ */
 async function updateStripeProductPrice(productId, amount, recurring = null) {
   if (!productId || !stripe) throw new Error('Stripe not configured or missing productId');
+
+  // Step 1 — Create new price first under the same product
   const priceParams = {
     product:     productId,
     unit_amount: Math.round(amount * 100),
@@ -781,18 +1418,22 @@ async function updateStripeProductPrice(productId, amount, recurring = null) {
     };
   }
   const newPrice = await stripe.prices.create(priceParams);
+
+  // Step 2 — Set new price as default (removes old price as default so it can be deactivated)
   await stripe.products.update(productId, { default_price: newPrice.id });
+
+  // Step 3 — Now safely deactivate old prices (they are no longer the default)
   const existing = await stripe.prices.list({ product: productId, active: true, limit: 100 });
   await Promise.all(
     existing.data
       .filter(p => p.id !== newPrice.id)
       .map(p => stripe.prices.update(p.id, { active: false }))
   );
+
   console.log(`💰  Stripe price updated on product ${productId} → new priceId=${newPrice.id} $${amount}`);
   return newPrice.id;
 }
-
-// ── GHL CONTACT UPSERT (tryout registration) ──────────────────
+  // ── GHL CONTACT UPSERT (tryout registration) ──────────────────
 async function upsertGHLContact({ completedBy, name, address, city, state, zip, cell, email,
                                    playerName, age, dob, hw, pos1, pos2, tryoutDate }) {
   if (!process.env.GHL_API_KEY || !process.env.GHL_LOCATION_ID) {
@@ -854,16 +1495,19 @@ async function upsertGHLPlayer({
       'https://services.leadconnectorhq.com/contacts/upsert',
       {
         locationId: process.env.GHL_LOCATION_ID,
+        // Contact main identity = Father
         firstName:  fatherFirst  || '',
         lastName:   fatherLast   || '',
         email:      fatherEmail  || '',
         phone:      fatherCell   || '',
+        // Address = Player's address
         address1:   address      || '',
         city:       city         || '',
         state:      state        || '',
         postalCode: zip          || '',
         tags: ['Player'],
         customFields: [
+          // Player info
           { key: 'players_name',      value: name         || '' },
           { key: 'player_dob',        value: dob          || '' },
           { key: 'player_email',      value: email        || '' },
@@ -879,6 +1523,7 @@ async function upsertGHLPlayer({
           { key: 'position1',         value: position     || '' },
           { key: 'position2',         value: pos2         || '' },
           { key: 'team_name',         value: teamName     || '' },
+          // Mother info
           { key: 'mother_first_name', value: motherFirst  || '' },
           { key: 'mother_last_name',  value: motherLast   || '' },
           { key: 'mother_cell',       value: motherCell   || '' },
@@ -1125,7 +1770,7 @@ app.post('/api/coach/forgot-password', async (req, res) => {
       otp_purpose: 'reset',
     });
 
-    await sendOTPEmail(coach.email, otp);
+    await sendOTPEmail(coach.email, otp, 'reset');
 
     res.json({
       message: 'If that email exists, a 6-digit code has been sent.',
@@ -1354,6 +1999,7 @@ app.put('/api/coach/tryouts/:tryoutId', requireAuth, async (req, res) => {
     const feeAmount  = parseFloat((newFee).replace('$', ''));
     const isFree     = isNaN(feeAmount) || feeAmount <= 0;
 
+    // Fields that affect the Stripe product name
     const nameChanged = existing.location !== location || existing.date !== date;
     const oldFeeAmt   = parseFloat((existing.fee || '').replace('$', ''));
     const feeChanged  = oldFeeAmt !== feeAmount;
@@ -1364,6 +2010,7 @@ app.put('/api/coach/tryouts/:tryoutId', requireAuth, async (req, res) => {
     if (stripe) {
       try {
         if (isFree) {
+          // Fee removed — archive existing product if any
           if (stripeProductId) {
             await deleteStripeProduct(stripeProductId);
             console.log(`🗑️  Tryout fee removed — archived product ${stripeProductId}`);
@@ -1372,6 +2019,7 @@ app.put('/api/coach/tryouts/:tryoutId', requireAuth, async (req, res) => {
           stripePriceId   = '';
 
         } else if (!stripeProductId) {
+          // No product yet (legacy record or missed on create) — create fresh
           const coach      = await Coach.findById(req.coachId).select('team_name');
           const teamLabel  = coach?.team_name || 'Team';
           const productName = `${teamLabel} - ${location} - ${date}`;
@@ -1386,6 +2034,7 @@ app.put('/api/coach/tryouts/:tryoutId', requireAuth, async (req, res) => {
           console.log(`📦  Stripe tryout product created (edit): "${productName}" → ${product.id} / ${price.id}`);
 
         } else {
+          // Product exists — update name if location/date changed
           if (nameChanged) {
             const coach      = await Coach.findById(req.coachId).select('team_name');
             const teamLabel  = coach?.team_name || 'Team';
@@ -1394,6 +2043,7 @@ app.put('/api/coach/tryouts/:tryoutId', requireAuth, async (req, res) => {
             console.log(`✏️  Stripe tryout product renamed: "${productName}"`);
           }
 
+          // Update price if fee changed — deactivate old, create new
           if (feeChanged) {
             if (stripePriceId) {
               await stripe.prices.update(stripePriceId, { active: false });
@@ -1519,6 +2169,17 @@ app.get('/api/coach/financials', requireAuth, async (req, res) => {
   }
 });
 
+// POST /api/coach/financials
+// Creates or updates financial settings and syncs Stripe products/prices directly.
+//
+// Rules:
+//   • Deposit OFF, Monthly OFF  → Full Payment product only
+//   • Deposit ON,  Monthly OFF  → Deposit + Remaining Balance products (no Full Payment)
+//   • Deposit OFF, Monthly ON   → Monthly Installment product only (no Full, no Remainder)
+//   • Deposit ON,  Monthly ON   → Deposit + Monthly Installment products only (NO Remainder — balance collected via installments)
+//   • Fee change   → archive all old Stripe products and recreate fresh
+//   • Toggle OFF   → archive that product, clear stored IDs
+//   • Stripe error → logs error but always saves to MongoDB
 app.post('/api/coach/financials', requireAuth, async (req, res) => {
   try {
     const {
@@ -1531,11 +2192,14 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
       installmentMonths,
     } = req.body;
 
+    // ── Fetch coach team name for Stripe product labels ───────
     const coach = await Coach.findById(req.coachId).select('team_name');
     const teamLabel = coach?.team_name || 'Team';
 
+    // ── Fetch existing record ─────────────────────────────────
     const existing = await TeamFinancials.findOne({ coach_id: req.coachId });
 
+    // ── Dollar amounts ────────────────────────────────────────
     const fee         = Number(playerFee)         || 0;
     const deposit     = Number(depositAmount)     || 250;
     const months      = Number(installmentMonths) || 3;
@@ -1544,9 +2208,11 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
       ? Math.round((fee / months) * 100) / 100
       : fee;
 
+    // ── Did the player fee or deposit amount change since last save? ──
     const feeChanged     = !!existing && existing.player_fee     !== fee;
     const depositChanged = !!existing && existing.deposit_amount !== deposit;
 
+    // ── Build the MongoDB update object ──────────────────────
     const update = {
       coach_id:           req.coachId,
       player_fee:         fee,
@@ -1558,7 +2224,9 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
       installment_months: months,
     };
 
+    // ── Stripe product/price sync ─────────────────────────────
     try {
+      // carry() returns the stored Stripe ID if fee is unchanged, '' if fee changed
       const carry = (field) => feeChanged ? '' : (existing?.[field] || '');
 
       update.stripe_product_full        = carry('stripe_product_full');
@@ -1570,27 +2238,32 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
       update.stripe_product_installment = carry('stripe_product_installment');
       update.stripe_price_installment   = carry('stripe_price_installment');
 
+      // If fee or deposit changed — update prices on affected products only
       if ((feeChanged || depositChanged) && existing) {
         console.log('💱  Fee/deposit changed — updating prices on affected Stripe products...');
 
+        // Full pay — update only if fee changed and deposit is still OFF
         if (feeChanged && existing.stripe_product_full && !depositEnabled) {
           const newPriceId = await updateStripeProductPrice(existing.stripe_product_full, fee);
           update.stripe_product_full = existing.stripe_product_full;
           update.stripe_price_full   = newPriceId;
         }
 
+        // Deposit — update only if deposit amount changed and deposit is still ON
         if (depositChanged && existing.stripe_product_deposit && depositEnabled && deposit > 0) {
           const newPriceId = await updateStripeProductPrice(existing.stripe_product_deposit, deposit);
           update.stripe_product_deposit = existing.stripe_product_deposit;
           update.stripe_price_deposit   = newPriceId;
         }
 
+        // Remainder — update if fee OR deposit changed (remainder = fee - deposit)
         if ((feeChanged || depositChanged) && existing.stripe_product_remainder && depositEnabled && remainder > 0 && !monthlyPayments) {
           const newPriceId = await updateStripeProductPrice(existing.stripe_product_remainder, remainder);
           update.stripe_product_remainder = existing.stripe_product_remainder;
           update.stripe_price_remainder   = newPriceId;
         }
 
+        // Installment — deactivate old prices only if fee changed (installment is based on fee)
         if (feeChanged && existing.stripe_product_installment && monthlyPayments) {
           const prices = await stripe.prices.list({ product: existing.stripe_product_installment, active: true, limit: 100 });
           await Promise.all(prices.data.map(p => stripe.prices.update(p.id, { active: false })));
@@ -1599,8 +2272,10 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
         }
       }
 
+      // ── Full pay product (ONLY when deposit is OFF) ───────────────────────────
       if (!depositEnabled) {
         if (fee > 0 && !update.stripe_product_full) {
+          // No existing product (new setup or deposit just turned OFF) — create fresh
           const { productId, priceId } = await createStripeProductWithPrice(
             `${teamLabel} – Full Payment ($${fee})`, fee
           );
@@ -1608,6 +2283,7 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
           update.stripe_price_full   = priceId;
         }
       } else {
+        // Deposit turned ON — full pay product no longer needed, archive it
         if (existing?.stripe_product_full) {
           await deleteStripeProduct(existing.stripe_product_full);
         }
@@ -1615,8 +2291,10 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
         update.stripe_price_full   = '';
       }
 
+      // ── Deposit product (ONLY when deposit is ON) ─────────────────────────────
       if (depositEnabled && deposit > 0) {
         if (!update.stripe_product_deposit) {
+          // No existing product (new setup or deposit just turned ON) — create fresh
           const { productId, priceId } = await createStripeProductWithPrice(
             `${teamLabel} – Deposit ($${deposit})`, deposit
           );
@@ -1624,6 +2302,7 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
           update.stripe_price_deposit   = priceId;
         }
       } else {
+        // Deposit turned OFF — archive deposit product
         if (existing?.stripe_product_deposit) {
           await deleteStripeProduct(existing.stripe_product_deposit);
         }
@@ -1631,8 +2310,10 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
         update.stripe_price_deposit   = '';
       }
 
+      // ── Remainder product (deposit ON + monthly OFF only) ─────────────────────
       if (depositEnabled && remainder > 0 && !monthlyPayments) {
         if (!update.stripe_product_remainder) {
+          // No existing product — create fresh
           const { productId, priceId } = await createStripeProductWithPrice(
             `${teamLabel} – Remaining Balance ($${remainder})`, remainder
           );
@@ -1640,6 +2321,7 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
           update.stripe_price_remainder   = priceId;
         }
       } else {
+        // Conditions no longer met — archive remainder product
         if (existing?.stripe_product_remainder) {
           await deleteStripeProduct(existing.stripe_product_remainder);
         }
@@ -1647,8 +2329,11 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
         update.stripe_price_remainder   = '';
       }
 
+      // ── Monthly installment product ───────────────────────────────────────────
+      // ONE product created as container. Prices created per-player at checkout.
       if (monthlyPayments) {
         if (!update.stripe_product_installment) {
+          // No existing product — create fresh
           const product = await stripe.products.create({
             name: `${teamLabel} – Monthly Installment`,
             metadata: { coachId: String(req.coachId), teamLabel },
@@ -1658,6 +2343,7 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
           console.log(`📦  Stripe installment product created: ${product.id}`);
         }
       } else {
+        // Monthly turned OFF — archive installment product
         if (existing?.stripe_product_installment) {
           await deleteStripeProduct(existing.stripe_product_installment);
         }
@@ -1670,6 +2356,7 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
       return res.status(500).json({ message: 'Payment setup failed: ' + stripeErr.message });
     }
 
+    // ── Persist to MongoDB ────────────────────────────────────
     const data = await TeamFinancials.findOneAndUpdate(
       { coach_id: req.coachId },
       update,
@@ -1684,7 +2371,24 @@ app.post('/api/coach/financials', requireAuth, async (req, res) => {
 });
 
 // ── STRIPE CHECKOUT ───────────────────────────────────────────
+// POST /api/checkout
+// Body: { coachId, paymentType, playerPaymentId, successUrl, cancelUrl }
+// paymentType: 'full' | 'deposit' | 'remainder' | 'installment'
 
+/**
+ * Returns the number of whole calendar months from today up to and including
+ * the deadline month, accounting for the day the player registered (charge day).
+ *
+ * chargeDay = day of month the player registered (Stripe bills on this day each month).
+ * If the charge day in the deadline month falls AFTER the deadline date, that month's
+ * charge will never fire before cancel_at kicks in — so we exclude it.
+ *
+ * Example: registered April 16, deadline October 15
+ *   → October charge fires Oct 16, which is after Oct 15 deadline → excluded
+ *   → 6 months counted (Apr, May, Jun, Jul, Aug, Sep)
+ *
+ * Always returns at least 1.
+ */
 function monthsRemainingUntilDeadline(deadlineStr, chargeDay) {
   if (!deadlineStr) return 1;
   const now      = new Date();
@@ -1696,6 +2400,8 @@ function monthsRemainingUntilDeadline(deadlineStr, chargeDay) {
 
   let months = deadlineMonth - nowMonth + 1;
 
+  // If Stripe would charge later in the month than the deadline date,
+  // that last charge is blocked by cancel_at — do not count it
   const day = chargeDay || now.getDate();
   if (day > deadline.getDate()) {
     months = months - 1;
@@ -1705,6 +2411,8 @@ function monthsRemainingUntilDeadline(deadlineStr, chargeDay) {
 }
 
 // GET /api/teams/:id/installment-preview
+// Public — returns the dynamic per-month amount for a player registering today.
+// Used by team.html to show the correct payment plan before checkout.
 app.get('/api/teams/:id/installment-preview', async (req, res) => {
   try {
     const financials = await TeamFinancials.findOne({ coach_id: req.params.id });
@@ -1739,6 +2447,9 @@ app.post('/api/checkout', async (req, res) => {
   if (!stripe) return res.status(500).json({ message: 'Stripe is not configured on the server' });
 
   try {
+    // pendingId — new pre-payment flow (no Player/PlayerPayment exists yet, materialized by webhook)
+    // playerPaymentId — legacy/coach-side flow (Player + PlayerPayment already exist, webhook updates them)
+    // Exactly one must be supplied.
     const { coachId, paymentType, playerPaymentId, pendingId, successUrl, cancelUrl } = req.body;
     if (!coachId || !paymentType) {
       return res.status(400).json({ message: 'coachId and paymentType are required' });
@@ -1747,6 +2458,7 @@ app.post('/api/checkout', async (req, res) => {
       return res.status(400).json({ message: 'Either playerPaymentId or pendingId is required' });
     }
 
+    // If a pendingId was passed, verify it exists and belongs to this coach.
     if (pendingId) {
       const pending = await PendingRegistration.findById(pendingId).lean();
       if (!pending) {
@@ -1757,16 +2469,19 @@ app.post('/api/checkout', async (req, res) => {
       }
     }
 
+    // ── Get stored Stripe price IDs from financials ───────────
     const financials = await TeamFinancials.findOne({ coach_id: coachId });
     if (!financials) return res.status(404).json({ message: 'Team financials not found' });
 
     const coach = await Coach.findById(coachId).select('team_name');
     const teamLabel = coach?.team_name || 'Team';
 
+    // ── Build checkout session ────────────────────────────────
     let lineItems;
     let mode;
 
     if (paymentType === 'installment') {
+      // ── DYNAMIC installment: calculate months remaining for this player ──
       if (!financials.monthly_payments) {
         return res.status(400).json({ message: 'Monthly payments are not enabled for this team.' });
       }
@@ -1786,6 +2501,7 @@ app.post('/api/checkout', async (req, res) => {
       const deposit      = financials.deposit_amount  || 0;
       const depEnabled   = financials.deposit_enabled || false;
 
+      // Balance to split = full fee, or fee minus deposit if deposit is enabled
       const balanceToSplit = depEnabled ? Math.max(0, fee - deposit) : fee;
       if (balanceToSplit <= 0) {
         return res.status(400).json({ message: 'No balance remaining to split into installments.' });
@@ -1793,19 +2509,33 @@ app.post('/api/checkout', async (req, res) => {
 
       const chargeDay     = new Date().getDate();
       const months        = monthsRemainingUntilDeadline(financials.payment_deadline, chargeDay);
+      // Industry-standard first-payment adjustment:
+      // Base amount = floor(total / months), remainder goes on month 1.
+      // e.g. $1000 / 3 = $333.33 base, $0.01 remainder
+      //   Month 1 → $333.34, Month 2-3 → $333.33, Total = $1000.00 exactly.
+      // The first payment is handled by checkout.session.completed which already
+      // records amountPaid from session.amount_total — so the correct amount is
+      // always captured regardless of which month it is.
       const baseMonthCents      = Math.floor((balanceToSplit / months) * 100);
       const remainderCents      = Math.round(balanceToSplit * 100) - (baseMonthCents * months);
-      const firstMonthCents     = baseMonthCents + remainderCents;
-      const perMonthCents       = baseMonthCents;
+      const firstMonthCents     = baseMonthCents + remainderCents; // month 1 absorbs remainder
+      const perMonthCents       = baseMonthCents;                  // months 2-N use base amount
 
       console.log(`📅  Installment checkout — deadline=${financials.payment_deadline} months=${months} balance=$${balanceToSplit} per-month=$${(perMonthCents/100).toFixed(2)}`);
 
+      // ── Find existing price for this exact amount AND month count ──────
+      // We match on BOTH unit_amount AND months metadata to avoid reusing a
+      // price from a previous deadline/registration that happens to have the
+      // same dollar amount but a different number of installments.
+      // e.g. $500/mo over 2 months vs $500/mo over 4 months are different plans
+      // even though the Stripe price amount is identical.
       const existingPrices = await stripe.prices.list({
         product: productId,
         active:  true,
         limit:   100,
       });
 
+      // Find or create the BASE recurring price (months 2-N)
       let installmentPrice = existingPrices.data.find(p =>
         p.unit_amount === perMonthCents &&
         p.metadata?.months === String(months) &&
@@ -1829,22 +2559,32 @@ app.post('/api/checkout', async (req, res) => {
         console.log(`💰  New Stripe price created ${installmentPrice.id} (${perMonthCents/100}/mo × ${months} months)`);
       }
 
+      // If there is a remainder, add a one-time invoice item for the extra cents.
+      // Stripe will merge it into the first invoice automatically so the player
+      // sees a single charge of (base + remainder) on month 1.
       if (remainderCents > 0) {
+        // We need the customer ID — look it up after session creation via webhook.
+        // Store remainderCents in session metadata so the webhook can add it.
         console.log(`🪙  Remainder ${remainderCents} cents will be added to first invoice`);
       }
 
+      // ── cancel_at = deadline date (Stripe auto-cancels the subscription) ──
       const cancelAtTimestamp = Math.floor(new Date(financials.payment_deadline) / 1000);
 
       mode      = 'subscription';
       lineItems = [{ price: installmentPrice.id, quantity: 1 }];
 
+      // Store for use in session metadata below
       req._installmentTotalMonths    = months;
       req._installmentRemainderCents = remainderCents;
-      req._installmentCancelAt       = cancelAtTimestamp;
+
+      // Store cancel_at for use in session creation below
+      req._installmentCancelAt = cancelAtTimestamp;
 
       console.log(`📅  Installment plan — months=${months} base=${perMonthCents/100} remainder=${remainderCents}cents first=${firstMonthCents/100}`);
 
     } else {
+      // ── Static payment types: full | deposit | remainder ──────
       const priceIdMap = {
         full:      financials.stripe_price_full,
         deposit:   financials.stripe_price_deposit,
@@ -1858,6 +2598,7 @@ app.post('/api/checkout', async (req, res) => {
         });
       }
 
+      // Verify the price is still active in Stripe
       let price;
       try {
         price = await stripe.prices.retrieve(priceId);
@@ -1875,12 +2616,14 @@ app.post('/api/checkout', async (req, res) => {
       lineItems = [{ price: priceId, quantity: 1 }];
     }
 
+    // ── Create checkout session ───────────────────────────────
     const sessionParams = {
       mode,
       line_items: lineItems,
       success_url: successUrl || `${req.headers.origin || 'https://yoursite.com'}?payment=success`,
       cancel_url:  cancelUrl  || `${req.headers.origin || 'https://yoursite.com'}?payment=cancelled`,
       metadata: {
+        // One of these will be set; the webhook handles both cases.
         ...(playerPaymentId ? { playerPaymentId } : {}),
         ...(pendingId       ? { pendingId       } : {}),
         paymentType,
@@ -1893,6 +2636,10 @@ app.post('/api/checkout', async (req, res) => {
       },
     };
 
+    // For installments: store ids on the subscription itself
+    // so the customer.subscription.deleted webhook can link back to the player.
+    // When pendingId is used, the webhook backfills playerPaymentId onto the
+    // subscription's metadata after materialization so recurring invoices work.
     if (paymentType === 'installment') {
       sessionParams.subscription_data = {
         metadata: {
@@ -2175,6 +2922,7 @@ app.put('/api/admin/coaches/:id/edit', requireAdmin, async (req, res) => {
   }
 });
 
+// GET /api/admin/coaches/:id/token — generate a coach JWT so admin can act as that coach
 app.get('/api/admin/coaches/:id/token', requireAdmin, async (req, res) => {
   try {
     const coach = await Coach.findById(req.params.id).select('_id');
@@ -2186,6 +2934,7 @@ app.get('/api/admin/coaches/:id/token', requireAdmin, async (req, res) => {
   }
 });
 
+// DELETE /api/admin/coaches/:id — delete coach account only (related data kept)
 app.delete('/api/admin/coaches/:id', requireAdmin, async (req, res) => {
   try {
     const coach = await Coach.findById(req.params.id);
@@ -2194,6 +2943,369 @@ app.delete('/api/admin/coaches/:id', requireAdmin, async (req, res) => {
     res.json({ message: 'Coach deleted' });
   } catch (err) {
     res.status(500).json({ message: err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+//  FINANCIAL MANAGEMENT — ADMIN ROUTES
+//  Added to support the Financial Management dashboard.
+//  All routes are under /api/admin/* and protected by requireAdmin.
+//  No existing routes or schemas were modified.
+// ════════════════════════════════════════════════════════════════
+
+// ── Shared helpers (local to this block) ─────────────────────────
+
+const round2 = n => Math.round((Number(n) || 0) * 100) / 100;
+
+// Fixed per-player fee Ambassadors Baseball keeps.
+// Change this value here and restart to update the calculation.
+const ORG_FEE_PER_PLAYER = 450;
+
+// Derive frontend-friendly status from amount_paid / balance.
+function finDerivedStatus(p) {
+  const paid = Number(p.amount_paid) || 0;
+  const bal  = Number(p.balance)     || 0;
+  if (paid === 0) return 'unpaid';
+  if (bal  === 0) return 'paid';
+  return 'partial';
+}
+
+// Build a display name for a coach document.
+function finTeamName(c) {
+  return c.team_name
+      || `${c.first_name || ''} ${c.last_name || ''}`.trim()
+      || 'Unnamed Team';
+}
+
+// Escape regex special chars before using user input in $regex queries.
+function finEscapeRegex(s) {
+  return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Compute payout summary for a coach — used by both GET and POST payout routes.
+//   totalOwedToCoach = Σ max(player.total_fee − ORG_FEE_PER_PLAYER, 0)
+//                      for every PlayerPayment where amount_paid > 0
+//   totalPaidToCoach = Σ CoachPayout.amount
+//   balanceToBePaid  = totalOwedToCoach − totalPaidToCoach
+async function finPayoutSummary(coachId) {
+  const coachObjId = new mongoose.Types.ObjectId(coachId);
+  const [owedAgg, payouts] = await Promise.all([
+    PlayerPayment.aggregate([
+      { $match: { coach_id: coachObjId, amount_paid: { $gt: 0 } } },
+      { $group: {
+          _id: null,
+          totalOwed: { $sum: { $max: [{ $subtract: ['$total_fee', ORG_FEE_PER_PLAYER] }, 0] } },
+      }},
+    ]),
+    CoachPayout.find({ coach_id: coachId }).sort({ date: -1 }).lean(),
+  ]);
+  const totalOwedToCoach = round2(owedAgg[0]?.totalOwed ?? 0);
+  const totalPaidToCoach = round2(payouts.reduce((s, p) => s + p.amount, 0));
+  return {
+    totalOwedToCoach,
+    totalPaidToCoach,
+    balanceToBePaid:  round2(totalOwedToCoach - totalPaidToCoach),
+    orgFeePerPlayer:  ORG_FEE_PER_PLAYER,
+    payouts: payouts.map(p => ({ id: p._id, date: p.date, amount: p.amount, notes: p.notes || '' })),
+  };
+}
+
+// ── GET /api/admin/organization-overview ─────────────────────────
+// Aggregate metrics across all active teams for the org dashboard:
+//   activeTeams, averagePlayerFee, totalCollected, outstanding,
+//   payingPlayers, totalPlayers, organizationProfit.
+app.get('/api/admin/organization-overview', requireAdmin, async (req, res) => {
+  try {
+    const activeCoaches = await Coach
+      .find({ active: { $ne: false } }).select('_id').lean();
+    const activeCoachIds = activeCoaches.map(c => c._id);
+    const activeTeams    = activeCoachIds.length;
+
+    if (activeTeams === 0) {
+      return res.json({ activeTeams: 0, averagePlayerFee: 0, totalCollected: 0, outstanding: 0, payingPlayers: 0, totalPlayers: 0, organizationProfit: 0 });
+    }
+
+    const [feeAgg, paymentAgg, budgetAgg, payingPlayers] = await Promise.all([
+      TeamFinancials.aggregate([
+        { $match: { coach_id: { $in: activeCoachIds } } },
+        { $group: { _id: null, totalFee: { $sum: '$player_fee' } } },
+      ]),
+      PlayerPayment.aggregate([
+        { $match: { coach_id: { $in: activeCoachIds } } },
+        { $group: { _id: null, collected: { $sum: '$amount_paid' }, outstanding: { $sum: '$balance' } } },
+      ]),
+      Budget.aggregate([
+        { $match: { coach_id: { $in: activeCoachIds } } },
+        { $sort: { created_at: -1 } },
+        { $group: { _id: '$coach_id', players: { $first: '$players' }, ambassadorsFee: { $first: '$ambassadors' } } },
+        { $group: { _id: null, totalPlayers: { $sum: '$players' }, organizationProfit: { $sum: '$ambassadorsFee' } } },
+      ]),
+      PlayerPayment.countDocuments({ coach_id: { $in: activeCoachIds }, amount_paid: { $gt: 0 } }),
+    ]);
+
+    res.json({
+      activeTeams,
+      averagePlayerFee:   round2((feeAgg[0]?.totalFee ?? 0) / activeTeams),
+      totalCollected:     round2(paymentAgg[0]?.collected         ?? 0),
+      outstanding:        round2(paymentAgg[0]?.outstanding       ?? 0),
+      payingPlayers,
+      totalPlayers:       budgetAgg[0]?.totalPlayers       ?? 0,
+      organizationProfit: round2(budgetAgg[0]?.organizationProfit ?? 0),
+    });
+  } catch (err) {
+    console.error('Organization overview error:', err);
+    res.status(500).json({ message: 'Failed to load organization overview' });
+  }
+});
+
+// ── GET /api/admin/outstanding-balances ──────────────────────────
+// Paginated list of players with balance > 0 across all active teams,
+// sorted by largest balance first.
+app.get('/api/admin/outstanding-balances', requireAdmin, async (req, res) => {
+  try {
+    const page    = Math.max(1, parseInt(req.query.page,    10) || 1);
+    const perPage = Math.min(100, Math.max(1, parseInt(req.query.perPage, 10) || 20));
+
+    const activeCoaches = await Coach
+      .find({ active: { $ne: false } }).select('_id team_name first_name last_name').lean();
+    const activeCoachIds = activeCoaches.map(c => c._id);
+
+    if (activeCoachIds.length === 0) return res.json({ players: [], total: 0, page, perPage });
+
+    const teamNameMap = Object.fromEntries(activeCoaches.map(c => [String(c._id), finTeamName(c)]));
+    const filter = { coach_id: { $in: activeCoachIds }, balance: { $gt: 0 } };
+    const [total, players] = await Promise.all([
+      PlayerPayment.countDocuments(filter),
+      PlayerPayment.find(filter).sort({ balance: -1, player_name: 1 }).skip((page - 1) * perPage).limit(perPage).lean(),
+    ]);
+
+    res.json({
+      players: players.map(p => ({
+        id: p._id, name: p.player_name || '—', team: teamNameMap[String(p.coach_id)] || '—',
+        totalFee: round2(p.total_fee), paidAmount: round2(p.amount_paid),
+        balance: round2(p.balance), status: finDerivedStatus(p),
+      })),
+      total, page, perPage,
+    });
+  } catch (err) {
+    console.error('Outstanding balances error:', err);
+    res.status(500).json({ message: 'Failed to load outstanding balances' });
+  }
+});
+
+// ── GET /api/admin/teams ─────────────────────────────────────────
+// Lightweight active-team list for the financial dashboard navbar dropdown.
+app.get('/api/admin/teams', requireAdmin, async (req, res) => {
+  try {
+    const coaches = await Coach
+      .find({ active: { $ne: false } }).select('_id first_name last_name team_name').lean();
+    const teams = coaches
+      .map(c => ({ id: c._id, name: finTeamName(c), coach: `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—' }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ teams });
+  } catch (err) {
+    console.error('Admin teams list error:', err);
+    res.status(500).json({ message: 'Failed to load teams' });
+  }
+});
+
+// ── GET /api/admin/team-rankings ─────────────────────────────────
+// Ranked list of active teams. sortBy: 'budget' | 'balance' | 'completed'.
+app.get('/api/admin/team-rankings', requireAdmin, async (req, res) => {
+  try {
+    const sortBy = String(req.query.sortBy || 'budget');
+    if (!['budget', 'balance', 'completed'].includes(sortBy)) {
+      return res.status(400).json({ message: "sortBy must be 'budget', 'balance', or 'completed'" });
+    }
+
+    const activeCoaches = await Coach
+      .find({ active: { $ne: false } }).select('_id first_name last_name team_name').lean();
+    const activeCoachIds = activeCoaches.map(c => c._id);
+    if (activeCoachIds.length === 0) return res.json({ rankings: [] });
+
+    const [budgets, payments] = await Promise.all([
+      Budget.aggregate([
+        { $match: { coach_id: { $in: activeCoachIds } } },
+        { $sort: { created_at: -1 } },
+        { $group: { _id: '$coach_id', total: { $first: '$total' } } },
+      ]),
+      PlayerPayment.aggregate([
+        { $match: { coach_id: { $in: activeCoachIds } } },
+        { $group: { _id: '$coach_id', collected: { $sum: '$amount_paid' }, balance: { $sum: '$balance' } } },
+      ]),
+    ]);
+
+    const budgetMap  = Object.fromEntries(budgets.map(b  => [String(b._id), b.total]));
+    const paymentMap = Object.fromEntries(payments.map(p => [String(p._id), p]));
+
+    const rows = activeCoaches.map(c => {
+      const budget    = round2(budgetMap[String(c._id)]  ?? 0);
+      const p         = paymentMap[String(c._id)] || {};
+      const collected = round2(p.collected ?? 0);
+      const balance   = round2(p.balance   ?? 0);
+      const percentCollected = budget > 0 ? round2(Math.min(100, (collected / budget) * 100)) : 0;
+      const completed = budget > 0 && collected >= budget;
+      return {
+        id: c._id, name: finTeamName(c),
+        coach: `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—',
+        budget, collected, balance, percentCollected, completed,
+      };
+    });
+
+    if (sortBy === 'budget')     rows.sort((a, b) => b.budget  - a.budget  || a.name.localeCompare(b.name));
+    else if (sortBy === 'balance')    rows.sort((a, b) => b.balance - a.balance || a.name.localeCompare(b.name));
+    else rows.sort((a, b) => {
+      if (a.completed !== b.completed) return a.completed ? -1 : 1;
+      return b.collected - a.collected || a.name.localeCompare(b.name);
+    });
+
+    res.json({ rankings: rows });
+  } catch (err) {
+    console.error('Team rankings error:', err);
+    res.status(500).json({ message: 'Failed to load team rankings' });
+  }
+});
+
+// ── GET /api/admin/teams/:coachId ────────────────────────────────
+// Single-team financial overview: budget, collected, balance, deadline,
+// good standing count, accounts-in-red count, player registration counts.
+app.get('/api/admin/teams/:coachId', requireAdmin, async (req, res) => {
+  try {
+    const { coachId } = req.params;
+    if (!mongoose.isValidObjectId(coachId)) return res.status(400).json({ message: 'Invalid team id' });
+
+    const coach = await Coach.findOne({ _id: coachId, active: { $ne: false } })
+      .select('_id first_name last_name team_name').lean();
+    if (!coach) return res.status(404).json({ message: 'Team not found or inactive' });
+
+    const coachObjId = new mongoose.Types.ObjectId(coachId);
+
+    const [financials, latestBudget, paymentAgg, playerStats] = await Promise.all([
+      TeamFinancials.findOne({ coach_id: coachId }).select('payment_deadline').lean(),
+      Budget.findOne({ coach_id: coachId }).sort({ created_at: -1 }).select('total players').lean(),
+      PlayerPayment.aggregate([
+        { $match: { coach_id: coachObjId } },
+        { $group: { _id: null, collected: { $sum: '$amount_paid' }, balance: { $sum: '$balance' } } },
+      ]),
+      PlayerPayment.aggregate([
+        { $match: { coach_id: coachObjId } },
+        { $group: { _id: null,
+            total:      { $sum: 1 },
+            paying:     { $sum: { $cond: [{ $gt: ['$amount_paid', 0] }, 1, 0] } },
+            hasBalance: { $sum: { $cond: [{ $gt: ['$balance',     0] }, 1, 0] } },
+        }},
+      ]),
+    ]);
+
+    const dl             = financials?.payment_deadline ? new Date(financials.payment_deadline) : null;
+    const deadlinePassed = !!(dl && dl < new Date());
+
+    res.json({
+      id:               coach._id,
+      name:             finTeamName(coach),
+      coach:            `${coach.first_name || ''} ${coach.last_name || ''}`.trim() || '—',
+      budget:           round2(latestBudget?.total    ?? 0),
+      budgetedPlayers:  latestBudget?.players          ?? 0,
+      totalCollected:   round2(paymentAgg[0]?.collected ?? 0),
+      balanceRemaining: round2(paymentAgg[0]?.balance   ?? 0),
+      paymentDeadline:  financials?.payment_deadline    || null,
+      deadlinePassed,
+      totalRegistered:  playerStats[0]?.total           ?? 0,
+      goodStanding:     playerStats[0]?.paying          ?? 0,
+      accountsInRed:    deadlinePassed ? (playerStats[0]?.hasBalance ?? 0) : 0,
+    });
+  } catch (err) {
+    console.error('Team detail error:', err);
+    res.status(500).json({ message: 'Failed to load team' });
+  }
+});
+
+// ── GET /api/admin/teams/:coachId/players ────────────────────────
+// Paginated team player list. status filter: all|paid|partial|unpaid|overdue.
+app.get('/api/admin/teams/:coachId/players', requireAdmin, async (req, res) => {
+  try {
+    const { coachId } = req.params;
+    if (!mongoose.isValidObjectId(coachId)) return res.status(400).json({ message: 'Invalid team id' });
+
+    const coachExists = await Coach.exists({ _id: coachId, active: { $ne: false } });
+    if (!coachExists) return res.status(404).json({ message: 'Team not found or inactive' });
+
+    const page    = Math.max(1, parseInt(req.query.page,    10) || 1);
+    const perPage = Math.min(100, Math.max(1, parseInt(req.query.perPage, 10) || 20));
+    const search  = (req.query.search || '').trim();
+    const status  = req.query.status;
+
+    const filter = { coach_id: coachId };
+    if (search) filter.player_name = { $regex: finEscapeRegex(search), $options: 'i' };
+
+    if      (status === 'paid')    { filter.amount_paid = { $gt: 0 }; filter.balance = 0; }
+    else if (status === 'partial') { filter.amount_paid = { $gt: 0 }; filter.balance = { $gt: 0 }; }
+    else if (status === 'unpaid')  { filter.amount_paid = 0; }
+    else if (status === 'overdue') { filter.balance = { $gt: 0 }; }
+
+    const [total, players] = await Promise.all([
+      PlayerPayment.countDocuments(filter),
+      PlayerPayment.find(filter).sort({ player_name: 1 }).skip((page - 1) * perPage).limit(perPage).lean(),
+    ]);
+
+    res.json({
+      players: players.map(p => ({
+        id: p._id, name: p.player_name || '—',
+        totalFee:   round2(p.total_fee),
+        paidAmount: round2(p.amount_paid),
+        balance:    round2(p.balance),
+        status:     finDerivedStatus(p),
+        lastPayment: p.updated_at || null,
+      })),
+      total, page, perPage,
+    });
+  } catch (err) {
+    console.error('Team players error:', err);
+    res.status(500).json({ message: 'Failed to load players' });
+  }
+});
+
+// ── GET /api/admin/teams/:coachId/payouts ────────────────────────
+// Payout history + computed totals for one team.
+app.get('/api/admin/teams/:coachId/payouts', requireAdmin, async (req, res) => {
+  try {
+    const { coachId } = req.params;
+    if (!mongoose.isValidObjectId(coachId)) return res.status(400).json({ message: 'Invalid team id' });
+    const coachExists = await Coach.exists({ _id: coachId, active: { $ne: false } });
+    if (!coachExists) return res.status(404).json({ message: 'Team not found or inactive' });
+    res.json(await finPayoutSummary(coachId));
+  } catch (err) {
+    console.error('Coach payouts GET error:', err);
+    res.status(500).json({ message: 'Failed to load payouts' });
+  }
+});
+
+// ── POST /api/admin/teams/:coachId/payouts ───────────────────────
+// Log a new Ambassadors Baseball → Coach payment.
+// Body: { date: string, amount: number, notes?: string }
+app.post('/api/admin/teams/:coachId/payouts', requireAdmin, async (req, res) => {
+  try {
+    const { coachId } = req.params;
+    if (!mongoose.isValidObjectId(coachId)) return res.status(400).json({ message: 'Invalid team id' });
+    const coachExists = await Coach.exists({ _id: coachId, active: { $ne: false } });
+    if (!coachExists) return res.status(404).json({ message: 'Team not found or inactive' });
+
+    const { date, amount, notes } = req.body;
+    const parsedAmount = parseFloat(amount);
+    if (!date || isNaN(new Date(date).getTime())) return res.status(400).json({ message: 'A valid date is required' });
+    if (!parsedAmount || parsedAmount <= 0)        return res.status(400).json({ message: 'Amount must be a positive number' });
+
+    await CoachPayout.create({
+      coach_id: coachId,
+      date:     new Date(date),
+      amount:   round2(parsedAmount),
+      notes:    (notes || '').trim().slice(0, 500),
+    });
+
+    res.status(201).json(await finPayoutSummary(coachId));
+  } catch (err) {
+    console.error('Coach payouts POST error:', err);
+    res.status(500).json({ message: 'Failed to save payout' });
   }
 });
 
@@ -2240,10 +3352,15 @@ app.get('/api/teams/:id/tryouts', async (req, res) => {
 
 app.get('/api/teams/:id/roster', async (req, res) => {
   try {
+    // ── ?paid=true — public team page: only show players with a completed checkout ──
+    // Coach dashboard calls this endpoint WITHOUT ?paid=true so it always sees everyone.
     if (req.query.paid === 'true') {
+      // Only filter if the team actually has a fee configured.
+      // If no financials exist (no payment required) show all registered players.
       const financials = await TeamFinancials.findOne({ coach_id: req.params.id });
 
       if (financials && (financials.player_fee || 0) > 0) {
+        // Find payment records where at least one successful payment was received
         const paidRecords = await PlayerPayment.find({
           coach_id:    req.params.id,
           amount_paid: { $gt: 0 },
@@ -2258,6 +3375,7 @@ app.get('/api/teams/:id/roster', async (req, res) => {
 
         return res.json({ players: players.map(normalizePlayer) });
       }
+      // No financials / no fee set → fall through and return all players
     }
 
     const players = await Player.find({ coach_id: req.params.id }).sort({ created_at: 1 });
@@ -2399,10 +3517,12 @@ app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
             playerName, age, dob, hw, pos1, pos2, tryoutDate, successUrl, cancelUrl } = req.body;
     if (!name || !playerName) return res.status(400).json({ message: 'Name and player name are required' });
 
+    // ── Look up the tryout to check if it has a fee ───────────
     const tryout = await Tryout.findOne({ coach_id: req.params.id, date: tryoutDate });
     const tryoutFeeAmount = tryout ? parseFloat((tryout.fee || '').replace('$', '')) : NaN;
     const isPaid = tryout && tryout.stripe_price_id && !isNaN(tryoutFeeAmount) && tryoutFeeAmount > 0;
 
+    // ── Save registration — pending_payment if paid, confirmed if free ──
     const reg = await TryoutRegistration.create({
       coach_id:     req.params.id,
       completed_by: completedBy || '',
@@ -2421,6 +3541,9 @@ app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
       pos2:         pos2        || '',
       tryout_date:  tryoutDate  || '',
       status:       isPaid ? 'pending_payment' : 'confirmed',
+      // Only paid tryouts get a 72h expiry — abandoned checkouts will be
+      // auto-deleted by the partial TTL index. Confirmed tryouts (free, or
+      // paid + completed) are immune from TTL deletion.
       expires_at:   isPaid ? new Date(Date.now() + 72 * 60 * 60 * 1000) : undefined,
     });
 
@@ -2442,6 +3565,7 @@ app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
         return res.status(201).json({ message: 'Proceed to payment', checkoutUrl: session.url, registration: reg });
       } catch (stripeErr) {
         console.error('❌  Tryout checkout creation failed:', stripeErr.message);
+        // Stripe failed — delete the pending record so the player can retry cleanly
         await TryoutRegistration.findByIdAndDelete(reg._id);
         return res.status(500).json({ message: 'Payment setup failed. Please try again.' });
       }
@@ -2453,22 +3577,71 @@ app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
       playerName, age, dob, hw, pos1, pos2, tryoutDate,
     });
 
+    // ── Notify coach + Mark (free tryout) ─────────────────────────
+    // Two sends, same body, different subjects:
+    //   1) Coach: short congrats subject (only if they have an email)
+    //   2) Mark:  detailed subject with player + coach + team
+    const coachRec = await Coach.findById(req.params.id).select('first_name last_name team_name email').catch(() => null);
+    const coachFullName = coachRec ? `${coachRec.first_name || ''} ${coachRec.last_name || ''}`.trim() : '';
+    const teamName = coachRec?.team_name || '';
+
+    const tryoutPayload = {
+      coachName:       coachFullName,
+      teamName,
+      registrantName:  name,
+      registrantCell:  cell,
+      registrantEmail: email,
+      playerName,
+      age, dob, pos1, pos2, hw,
+      address, city, state, zip,
+      tryoutDate,
+      isPaid: false,
+    };
+
+    // (1) Coach — short congrats subject
+    if (coachRec?.email) {
+      try {
+        await sendCoachTryoutNotificationEmail({
+          ...tryoutPayload,
+          subject:    'Congratulations! A new player has registered for your tryout.',
+          recipients: coachRec.email,
+        });
+      } catch (e) { console.error('⚠️  Coach tryout email error (free, coach):', e.message); }
+    }
+
+    // (2) Sajeeb — detailed subject
+    try {
+      const markSubject = `New Tryout Registration — ${playerName || 'Player'} with Coach ${coachFullName || 'Unknown'} (${teamName || 'Unknown Team'})`;
+      await sendCoachTryoutNotificationEmail({
+        ...tryoutPayload,
+        subject:    markSubject,
+        recipients: 'sajeeb@appsus.io',
+      });
+    } catch (e) { console.error('⚠️  Coach tryout email error (free, mark):', e.message); }
+
     res.status(201).json({ message: 'Registration submitted', registration: reg, ghl: ghlResult });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// ── PENDING REGISTRATION ──────────────────────────────────────
+// ── PENDING REGISTRATION (used by public registration forms) ─────
+// Replaces the old "create Player + create PlayerPayment up front" pattern.
+// The form payload is stashed here, the _id is handed to Stripe checkout in
+// session metadata, and the webhook materializes Player + PlayerPayment + GHL
+// only after payment succeeds. Abandoned pendings auto-expire via TTL (48h).
 app.post('/api/registrations/pending', async (req, res) => {
   try {
     const {
       coachId,
+      // Player payload — accepts every field both registration forms send.
       name, jersey, jersey2, gradYear, position, pos2, hw, city, state,
       address, zip, email, cell, dob, bats, throws, highSchool,
       motherFirst, motherLast, motherCell, motherEmail,
       fatherFirst, fatherLast, fatherCell, fatherEmail,
       teamName,
+      // Payment-snapshot fields — captured at submit time so we know what
+      // the parent saw and agreed to.
       totalFee, depositAmount, paymentPlan, paymentDeadline, registeredDate,
     } = req.body;
 
@@ -2499,5 +3672,8 @@ app.post('/api/registrations/pending', async (req, res) => {
   }
 });
 
-// ── VERCEL SERVERLESS EXPORT ──────────────────────────────────
-module.exports = app;
+// ── START SERVER ─────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`🚀  Server running on port ${PORT}`);
+});
