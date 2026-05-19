@@ -3363,7 +3363,7 @@ app.get('/api/admin/fin/organization-overview', requireAdmin, async (req, res) =
         { $group: { _id: '$coach_id', total: { $first: '$total' }, players: { $first: '$players' } } },
       ]),
       PlayerPayment.aggregate([
-        { $match: { coach_id: { $in: activeCoachIds } } },
+        { $match: { coach_id: { $in: activeCoachIds }, status: { $in: ['Partial', 'Paid'] } } },
         { $group: { _id: null, collected: { $sum: '$amount_paid' }, outstanding: { $sum: '$balance' } } },
       ]),
       // totalRegistered: all PlayerPayment docs
@@ -3371,7 +3371,7 @@ app.get('/api/admin/fin/organization-overview', requireAdmin, async (req, res) =
       // notFullyPaid = totalRegistered - fullyPaid
       // organizationProfit = totalRegistered * 450
       PlayerPayment.aggregate([
-        { $match: { coach_id: { $in: activeCoachIds } } },
+        { $match: { coach_id: { $in: activeCoachIds }, status: { $in: ['Partial', 'Paid'] } } },
         { $group: {
             _id:         null,
             total:       { $sum: 1 },
@@ -3445,7 +3445,7 @@ app.get('/api/admin/fin/team-rankings', requireAdmin, async (req, res) => {
         { $group: { _id: '$coach_id', total: { $first: '$total' } } },
       ]),
       PlayerPayment.aggregate([
-        { $match: { coach_id: { $in: activeCoachIds } } },
+        { $match: { coach_id: { $in: activeCoachIds }, status: { $in: ['Partial', 'Paid'] } } },
         { $group: { _id: '$coach_id', collected: { $sum: '$amount_paid' }, balance: { $sum: '$balance' } } },
       ]),
     ]);
@@ -3497,11 +3497,11 @@ app.get('/api/admin/fin/teams/:coachId', requireAdmin, async (req, res) => {
       TeamFinancials.findOne({ coach_id: coachId }).select('payment_deadline').lean(),
       Budget.findOne({ coach_id: coachId }).sort({ created_at: -1 }).select('total players').lean(),
       PlayerPayment.aggregate([
-        { $match: { coach_id: coachObjId } },
+        { $match: { coach_id: coachObjId, status: { $in: ['Partial', 'Paid'] } } },
         { $group: { _id: null, collected: { $sum: '$amount_paid' }, balance: { $sum: '$balance' } } },
       ]),
       PlayerPayment.aggregate([
-        { $match: { coach_id: coachObjId } },
+        { $match: { coach_id: coachObjId, status: { $in: ['Partial', 'Paid'] } } },
         { $group: { _id: null,
             total:      { $sum: 1 },
             fullyPaid:  { $sum: { $cond: [{ $and: [{ $eq: ['$balance', 0] }, { $gt: ['$amount_paid', 0] }] }, 1, 0] } },
@@ -3540,7 +3540,7 @@ app.get('/api/admin/fin/teams/:coachId/players', requireAdmin, async (req, res) 
     const perPage = Math.min(100, Math.max(1, parseInt(req.query.perPage, 10) || 20));
     const search  = (req.query.search || '').trim();
     const status  = req.query.status;
-    const filter  = { coach_id: coachId };
+    const filter  = { coach_id: coachId, status: { $in: ['Partial', 'Paid'] } };
     if (search) filter.player_name = { $regex: finEscapeRegex(search), $options: 'i' };
     if      (status === 'paid')    { filter.amount_paid = { $gt: 0 }; filter.balance = 0; }
     else if (status === 'partial') { filter.amount_paid = { $gt: 0 }; filter.balance = { $gt: 0 }; }
@@ -3575,7 +3575,7 @@ app.get('/api/admin/fin/outstanding-balances', requireAdmin, async (req, res) =>
     const activeCoachIds = activeCoaches.map(c => c._id);
     if (activeCoachIds.length === 0) return res.json({ players: [], total: 0, page, perPage });
     const teamNameMap = Object.fromEntries(activeCoaches.map(c => [String(c._id), finTeamName(c)]));
-    const filter = { coach_id: { $in: activeCoachIds }, balance: { $gt: 0 } };
+    const filter = { coach_id: { $in: activeCoachIds }, status: { $in: ['Partial', 'Paid'] }, balance: { $gt: 0 } };
     const [total, players] = await Promise.all([
       PlayerPayment.countDocuments(filter),
       PlayerPayment.find(filter).sort({ balance: -1, player_name: 1 }).skip((page - 1) * perPage).limit(perPage).lean(),
@@ -3631,7 +3631,7 @@ async function finGetPayoutSummary(coachId) {
   const coachObjId = new mongoose.Types.ObjectId(coachId);
   const [owedAgg, payouts] = await Promise.all([
     PlayerPayment.aggregate([
-      { $match: { coach_id: coachObjId, amount_paid: { $gt: 0 } } },
+      { $match: { coach_id: coachObjId, status: { $in: ['Partial', 'Paid'] }, amount_paid: { $gt: 0 } } },
       { $group: { _id: null, totalOwed: { $sum: { $max: [{ $subtract: ['$total_fee', FIN_ORG_FEE_PER_PLAYER] }, 0] } } } },
     ]),
     CoachPayout.find({ coach_id: coachId }).sort({ date: -1 }).lean(),
@@ -3662,11 +3662,11 @@ app.get('/api/coach/fin/overview', requireAuth, async (req, res) => {
       TeamFinancials.findOne({ coach_id: coachId }).select('payment_deadline').lean(),
       Budget.findOne({ coach_id: coachId }).sort({ created_at: -1 }).select('total players').lean(),
       PlayerPayment.aggregate([
-        { $match: { coach_id: coachObjId } },
+        { $match: { coach_id: coachObjId, status: { $in: ['Partial', 'Paid'] } } },
         { $group: { _id: null, collected: { $sum: '$amount_paid' }, balance: { $sum: '$balance' } } },
       ]),
       PlayerPayment.aggregate([
-        { $match: { coach_id: coachObjId } },
+        { $match: { coach_id: coachObjId, status: { $in: ['Partial', 'Paid'] } } },
         { $group: { _id: null,
             total:      { $sum: 1 },
             fullyPaid:  { $sum: { $cond: [{ $and: [{ $eq: ['$balance', 0] }, { $gt: ['$amount_paid', 0] }] }, 1, 0] } },
@@ -3708,7 +3708,7 @@ app.get('/api/coach/fin/players', requireAuth, async (req, res) => {
     const perPage = Math.min(100, Math.max(1, parseInt(req.query.perPage, 10) || 20));
     const search  = (req.query.search || '').trim();
     const status  = req.query.status;
-    const filter  = { coach_id: coachId };
+    const filter  = { coach_id: coachId, status: { $in: ['Partial', 'Paid'] } };
     if (search) filter.player_name = { $regex: finEscapeRegex(search), $options: 'i' };
     if      (status === 'paid')    { filter.amount_paid = { $gt: 0 }; filter.balance = 0; }
     else if (status === 'partial') { filter.amount_paid = { $gt: 0 }; filter.balance = { $gt: 0 }; }
