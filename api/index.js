@@ -3433,7 +3433,7 @@ app.get('/api/admin/fin/team-rankings', requireAdmin, async (req, res) => {
     ]);
     const budgetByCoach  = Object.fromEntries(budgets .map(b => [String(b._id), b.total]));
     const paymentByCoach = Object.fromEntries(payments.map(p => [String(p._id), p]));
-    const rows = activeCoaches.map(c => {
+    let rows = activeCoaches.map(c => {
       const budget    = finRound2(budgetByCoach[String(c._id)] ?? 0);
       const p         = paymentByCoach[String(c._id)] || { collected: 0, balance: 0 };
       const collected = finRound2(p.collected);
@@ -3442,9 +3442,16 @@ app.get('/api/admin/fin/team-rankings', requireAdmin, async (req, res) => {
       const completed = budget > 0 && collected >= budget;
       return { id: c._id, name: finTeamName(c), coach: finCoachName(c), budget, collected, balance, percentCollected, completed };
     });
-    if (sortBy === 'budget')     rows.sort((a, b) => b.budget    - a.budget    || a.name.localeCompare(b.name));
-    else if (sortBy === 'balance') rows.sort((a, b) => b.balance  - a.balance  || a.name.localeCompare(b.name));
-    else rows.sort((a, b) => { if (a.completed !== b.completed) return a.completed ? -1 : 1; return b.collected - a.collected || a.name.localeCompare(b.name); });
+    // Filter and sort based on sortBy parameter
+    if (sortBy === 'budget') {
+      rows.sort((a, b) => b.budget - a.budget || a.name.localeCompare(b.name));
+    } else if (sortBy === 'balance') {
+      rows.sort((a, b) => b.balance - a.balance || a.name.localeCompare(b.name));
+    } else {
+      // For 'completed': filter to show only teams with 100% budget completion, then sort by percentage
+      rows = rows.filter(r => r.completed);
+      rows.sort((a, b) => b.percentCollected - a.percentCollected || a.name.localeCompare(b.name));
+    }
     res.json({ rankings: rows });
   } catch (err) {
     res.status(500).json({ message: 'Failed to load team rankings' });
@@ -3468,7 +3475,11 @@ app.get('/api/admin/fin/teams/:coachId', requireAdmin, async (req, res) => {
       ]),
       PlayerPayment.aggregate([
         { $match: { coach_id: coachObjId } },
-        { $group: { _id: null, total: { $sum: 1 }, paying: { $sum: { $cond: [{ $gt: ['$amount_paid', 0] }, 1, 0] } }, hasBalance: { $sum: { $cond: [{ $gt: ['$balance', 0] }, 1, 0] } } } },
+        { $group: { _id: null,
+            total:      { $sum: 1 },
+            fullyPaid:  { $sum: { $cond: [{ $and: [{ $eq: ['$balance', 0] }, { $gt: ['$amount_paid', 0] }] }, 1, 0] } },
+            hasBalance: { $sum: { $cond: [{ $gt: ['$balance', 0] }, 1, 0] } },
+        }},
       ]),
     ]);
     const dl = financials?.payment_deadline ? new Date(financials.payment_deadline) : null;
@@ -3483,7 +3494,7 @@ app.get('/api/admin/fin/teams/:coachId', requireAdmin, async (req, res) => {
       paymentDeadline:  financials?.payment_deadline       || null,
       deadlinePassed,
       totalRegistered:  playerStats[0]?.total             ?? 0,
-      goodStanding:     playerStats[0]?.paying            ?? 0,
+      goodStanding:     playerStats[0]?.fullyPaid         ?? 0,
       accountsInRed,
     });
   } catch (err) {
@@ -3629,7 +3640,11 @@ app.get('/api/coach/fin/overview', requireAuth, async (req, res) => {
       ]),
       PlayerPayment.aggregate([
         { $match: { coach_id: coachObjId } },
-        { $group: { _id: null, total: { $sum: 1 }, paying: { $sum: { $cond: [{ $gt: ['$amount_paid', 0] }, 1, 0] } }, hasBalance: { $sum: { $cond: [{ $gt: ['$balance', 0] }, 1, 0] } } } },
+        { $group: { _id: null,
+            total:      { $sum: 1 },
+            fullyPaid:  { $sum: { $cond: [{ $and: [{ $eq: ['$balance', 0] }, { $gt: ['$amount_paid', 0] }] }, 1, 0] } },
+            hasBalance: { $sum: { $cond: [{ $gt: ['$balance', 0] }, 1, 0] } },
+        }},
       ]),
     ]);
     if (!coach) return res.status(404).json({ message: 'Coach not found' });
@@ -3649,7 +3664,7 @@ app.get('/api/coach/fin/overview', requireAuth, async (req, res) => {
       paymentDeadline:  financials?.payment_deadline       || null,
       deadlinePassed,
       totalRegistered:  playerStats[0]?.total             ?? 0,
-      goodStanding:     playerStats[0]?.paying            ?? 0,
+      goodStanding:     playerStats[0]?.fullyPaid         ?? 0,
       accountsInRed,
     });
   } catch (err) {
