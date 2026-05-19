@@ -436,7 +436,7 @@ const REQUIRED_ENV = ['MONGODB_URI', 'JWT_SECRET'];
 const missingEnv = REQUIRED_ENV.filter(k => !process.env[k]);
 if (missingEnv.length) {
   console.error('❌  Missing required environment variables:', missingEnv.join(', '));
-  process.exit(1);
+  // Note: process.exit() not used in serverless — missing vars will surface as runtime errors
 }
 
 const app = express();
@@ -1053,10 +1053,28 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 
 app.use(express.json({ limit: '10mb' }));
 
-// ── MONGODB CONNECTION ────────────────────────────────────────────
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('✅  MongoDB connected'))
-  .catch(err => { console.error('❌  MongoDB connection error:', err); process.exit(1); });
+// ── MONGODB CONNECTION (serverless-safe cached connection) ────────
+// Vercel spins up a new function instance per request but reuses the
+// Node process across warm invocations. Caching the promise avoids
+// opening a new connection on every request while still handling the
+// case where mongoose.connection is not yet ready.
+let _mongoConnPromise = null;
+function ensureMongoConnected() {
+  if (mongoose.connection.readyState === 1) return Promise.resolve();
+  if (!_mongoConnPromise) {
+    _mongoConnPromise = mongoose
+      .connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10000 })
+      .then(() => { console.log('\u2705  MongoDB connected'); })
+      .catch(err => { _mongoConnPromise = null; throw err; });
+  }
+  return _mongoConnPromise;
+}
+
+// Middleware that ensures DB is ready before every request
+app.use(async (req, res, next) => {
+  try { await ensureMongoConnected(); next(); }
+  catch (err) { console.error('\u274c  MongoDB connection error:', err); res.status(503).json({ message: 'Database unavailable' }); }
+});
 
 // ════════════════════════════════════════════════════════════════
 //  MONGOOSE SCHEMAS & MODELS
@@ -1275,9 +1293,6 @@ pendingRegistrationSchema.index({ coach_id: 1 });
 // MongoDB TTL index — documents are removed when expires_at is reached.
 pendingRegistrationSchema.index({ expires_at: 1 }, { expireAfterSeconds: 0 });
 
-// ── COACH PAYOUT (logs each payment Ambassadors Baseball makes to a coach) ──
-// totalOwedToCoach = Σ max(PlayerPayment.total_fee − $450, 0) per registered player
-// balanceToBePaid  = totalOwedToCoach − Σ CoachPayout.amount
 const coachPayoutSchema = new mongoose.Schema({
   coach_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Coach', required: true },
   date:     { type: Date,   required: true },
@@ -2947,369 +2962,6 @@ app.delete('/api/admin/coaches/:id', requireAdmin, async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════
-//  FINANCIAL MANAGEMENT — ADMIN ROUTES
-//  Added to support the Financial Management dashboard.
-//  All routes are under /api/admin/* and protected by requireAdmin.
-//  No existing routes or schemas were modified.
-// ════════════════════════════════════════════════════════════════
-
-// ── Shared helpers (local to this block) ─────────────────────────
-
-const round2 = n => Math.round((Number(n) || 0) * 100) / 100;
-
-// Fixed per-player fee Ambassadors Baseball keeps.
-// Change this value here and restart to update the calculation.
-const ORG_FEE_PER_PLAYER = 450;
-
-// Derive frontend-friendly status from amount_paid / balance.
-function finDerivedStatus(p) {
-  const paid = Number(p.amount_paid) || 0;
-  const bal  = Number(p.balance)     || 0;
-  if (paid === 0) return 'unpaid';
-  if (bal  === 0) return 'paid';
-  return 'partial';
-}
-
-// Build a display name for a coach document.
-function finTeamName(c) {
-  return c.team_name
-      || `${c.first_name || ''} ${c.last_name || ''}`.trim()
-      || 'Unnamed Team';
-}
-
-// Escape regex special chars before using user input in $regex queries.
-function finEscapeRegex(s) {
-  return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-// Compute payout summary for a coach — used by both GET and POST payout routes.
-//   totalOwedToCoach = Σ max(player.total_fee − ORG_FEE_PER_PLAYER, 0)
-//                      for every PlayerPayment where amount_paid > 0
-//   totalPaidToCoach = Σ CoachPayout.amount
-//   balanceToBePaid  = totalOwedToCoach − totalPaidToCoach
-async function finPayoutSummary(coachId) {
-  const coachObjId = new mongoose.Types.ObjectId(coachId);
-  const [owedAgg, payouts] = await Promise.all([
-    PlayerPayment.aggregate([
-      { $match: { coach_id: coachObjId, amount_paid: { $gt: 0 } } },
-      { $group: {
-          _id: null,
-          totalOwed: { $sum: { $max: [{ $subtract: ['$total_fee', ORG_FEE_PER_PLAYER] }, 0] } },
-      }},
-    ]),
-    CoachPayout.find({ coach_id: coachId }).sort({ date: -1 }).lean(),
-  ]);
-  const totalOwedToCoach = round2(owedAgg[0]?.totalOwed ?? 0);
-  const totalPaidToCoach = round2(payouts.reduce((s, p) => s + p.amount, 0));
-  return {
-    totalOwedToCoach,
-    totalPaidToCoach,
-    balanceToBePaid:  round2(totalOwedToCoach - totalPaidToCoach),
-    orgFeePerPlayer:  ORG_FEE_PER_PLAYER,
-    payouts: payouts.map(p => ({ id: p._id, date: p.date, amount: p.amount, notes: p.notes || '' })),
-  };
-}
-
-// ── GET /api/admin/organization-overview ─────────────────────────
-// Aggregate metrics across all active teams for the org dashboard:
-//   activeTeams, averagePlayerFee, totalCollected, outstanding,
-//   payingPlayers, totalPlayers, organizationProfit.
-app.get('/api/admin/organization-overview', requireAdmin, async (req, res) => {
-  try {
-    const activeCoaches = await Coach
-      .find({ active: { $ne: false } }).select('_id').lean();
-    const activeCoachIds = activeCoaches.map(c => c._id);
-    const activeTeams    = activeCoachIds.length;
-
-    if (activeTeams === 0) {
-      return res.json({ activeTeams: 0, averagePlayerFee: 0, totalCollected: 0, outstanding: 0, payingPlayers: 0, totalPlayers: 0, organizationProfit: 0 });
-    }
-
-    const [feeAgg, paymentAgg, budgetAgg, payingPlayers] = await Promise.all([
-      TeamFinancials.aggregate([
-        { $match: { coach_id: { $in: activeCoachIds } } },
-        { $group: { _id: null, totalFee: { $sum: '$player_fee' } } },
-      ]),
-      PlayerPayment.aggregate([
-        { $match: { coach_id: { $in: activeCoachIds } } },
-        { $group: { _id: null, collected: { $sum: '$amount_paid' }, outstanding: { $sum: '$balance' } } },
-      ]),
-      Budget.aggregate([
-        { $match: { coach_id: { $in: activeCoachIds } } },
-        { $sort: { created_at: -1 } },
-        { $group: { _id: '$coach_id', players: { $first: '$players' }, ambassadorsFee: { $first: '$ambassadors' } } },
-        { $group: { _id: null, totalPlayers: { $sum: '$players' }, organizationProfit: { $sum: '$ambassadorsFee' } } },
-      ]),
-      PlayerPayment.countDocuments({ coach_id: { $in: activeCoachIds }, amount_paid: { $gt: 0 } }),
-    ]);
-
-    res.json({
-      activeTeams,
-      averagePlayerFee:   round2((feeAgg[0]?.totalFee ?? 0) / activeTeams),
-      totalCollected:     round2(paymentAgg[0]?.collected         ?? 0),
-      outstanding:        round2(paymentAgg[0]?.outstanding       ?? 0),
-      payingPlayers,
-      totalPlayers:       budgetAgg[0]?.totalPlayers       ?? 0,
-      organizationProfit: round2(budgetAgg[0]?.organizationProfit ?? 0),
-    });
-  } catch (err) {
-    console.error('Organization overview error:', err);
-    res.status(500).json({ message: 'Failed to load organization overview' });
-  }
-});
-
-// ── GET /api/admin/outstanding-balances ──────────────────────────
-// Paginated list of players with balance > 0 across all active teams,
-// sorted by largest balance first.
-app.get('/api/admin/outstanding-balances', requireAdmin, async (req, res) => {
-  try {
-    const page    = Math.max(1, parseInt(req.query.page,    10) || 1);
-    const perPage = Math.min(100, Math.max(1, parseInt(req.query.perPage, 10) || 20));
-
-    const activeCoaches = await Coach
-      .find({ active: { $ne: false } }).select('_id team_name first_name last_name').lean();
-    const activeCoachIds = activeCoaches.map(c => c._id);
-
-    if (activeCoachIds.length === 0) return res.json({ players: [], total: 0, page, perPage });
-
-    const teamNameMap = Object.fromEntries(activeCoaches.map(c => [String(c._id), finTeamName(c)]));
-    const filter = { coach_id: { $in: activeCoachIds }, balance: { $gt: 0 } };
-    const [total, players] = await Promise.all([
-      PlayerPayment.countDocuments(filter),
-      PlayerPayment.find(filter).sort({ balance: -1, player_name: 1 }).skip((page - 1) * perPage).limit(perPage).lean(),
-    ]);
-
-    res.json({
-      players: players.map(p => ({
-        id: p._id, name: p.player_name || '—', team: teamNameMap[String(p.coach_id)] || '—',
-        totalFee: round2(p.total_fee), paidAmount: round2(p.amount_paid),
-        balance: round2(p.balance), status: finDerivedStatus(p),
-      })),
-      total, page, perPage,
-    });
-  } catch (err) {
-    console.error('Outstanding balances error:', err);
-    res.status(500).json({ message: 'Failed to load outstanding balances' });
-  }
-});
-
-// ── GET /api/admin/teams ─────────────────────────────────────────
-// Lightweight active-team list for the financial dashboard navbar dropdown.
-app.get('/api/admin/teams', requireAdmin, async (req, res) => {
-  try {
-    const coaches = await Coach
-      .find({ active: { $ne: false } }).select('_id first_name last_name team_name').lean();
-    const teams = coaches
-      .map(c => ({ id: c._id, name: finTeamName(c), coach: `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—' }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-    res.json({ teams });
-  } catch (err) {
-    console.error('Admin teams list error:', err);
-    res.status(500).json({ message: 'Failed to load teams' });
-  }
-});
-
-// ── GET /api/admin/team-rankings ─────────────────────────────────
-// Ranked list of active teams. sortBy: 'budget' | 'balance' | 'completed'.
-app.get('/api/admin/team-rankings', requireAdmin, async (req, res) => {
-  try {
-    const sortBy = String(req.query.sortBy || 'budget');
-    if (!['budget', 'balance', 'completed'].includes(sortBy)) {
-      return res.status(400).json({ message: "sortBy must be 'budget', 'balance', or 'completed'" });
-    }
-
-    const activeCoaches = await Coach
-      .find({ active: { $ne: false } }).select('_id first_name last_name team_name').lean();
-    const activeCoachIds = activeCoaches.map(c => c._id);
-    if (activeCoachIds.length === 0) return res.json({ rankings: [] });
-
-    const [budgets, payments] = await Promise.all([
-      Budget.aggregate([
-        { $match: { coach_id: { $in: activeCoachIds } } },
-        { $sort: { created_at: -1 } },
-        { $group: { _id: '$coach_id', total: { $first: '$total' } } },
-      ]),
-      PlayerPayment.aggregate([
-        { $match: { coach_id: { $in: activeCoachIds } } },
-        { $group: { _id: '$coach_id', collected: { $sum: '$amount_paid' }, balance: { $sum: '$balance' } } },
-      ]),
-    ]);
-
-    const budgetMap  = Object.fromEntries(budgets.map(b  => [String(b._id), b.total]));
-    const paymentMap = Object.fromEntries(payments.map(p => [String(p._id), p]));
-
-    const rows = activeCoaches.map(c => {
-      const budget    = round2(budgetMap[String(c._id)]  ?? 0);
-      const p         = paymentMap[String(c._id)] || {};
-      const collected = round2(p.collected ?? 0);
-      const balance   = round2(p.balance   ?? 0);
-      const percentCollected = budget > 0 ? round2(Math.min(100, (collected / budget) * 100)) : 0;
-      const completed = budget > 0 && collected >= budget;
-      return {
-        id: c._id, name: finTeamName(c),
-        coach: `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—',
-        budget, collected, balance, percentCollected, completed,
-      };
-    });
-
-    if (sortBy === 'budget')     rows.sort((a, b) => b.budget  - a.budget  || a.name.localeCompare(b.name));
-    else if (sortBy === 'balance')    rows.sort((a, b) => b.balance - a.balance || a.name.localeCompare(b.name));
-    else rows.sort((a, b) => {
-      if (a.completed !== b.completed) return a.completed ? -1 : 1;
-      return b.collected - a.collected || a.name.localeCompare(b.name);
-    });
-
-    res.json({ rankings: rows });
-  } catch (err) {
-    console.error('Team rankings error:', err);
-    res.status(500).json({ message: 'Failed to load team rankings' });
-  }
-});
-
-// ── GET /api/admin/teams/:coachId ────────────────────────────────
-// Single-team financial overview: budget, collected, balance, deadline,
-// good standing count, accounts-in-red count, player registration counts.
-app.get('/api/admin/teams/:coachId', requireAdmin, async (req, res) => {
-  try {
-    const { coachId } = req.params;
-    if (!mongoose.isValidObjectId(coachId)) return res.status(400).json({ message: 'Invalid team id' });
-
-    const coach = await Coach.findOne({ _id: coachId, active: { $ne: false } })
-      .select('_id first_name last_name team_name').lean();
-    if (!coach) return res.status(404).json({ message: 'Team not found or inactive' });
-
-    const coachObjId = new mongoose.Types.ObjectId(coachId);
-
-    const [financials, latestBudget, paymentAgg, playerStats] = await Promise.all([
-      TeamFinancials.findOne({ coach_id: coachId }).select('payment_deadline').lean(),
-      Budget.findOne({ coach_id: coachId }).sort({ created_at: -1 }).select('total players').lean(),
-      PlayerPayment.aggregate([
-        { $match: { coach_id: coachObjId } },
-        { $group: { _id: null, collected: { $sum: '$amount_paid' }, balance: { $sum: '$balance' } } },
-      ]),
-      PlayerPayment.aggregate([
-        { $match: { coach_id: coachObjId } },
-        { $group: { _id: null,
-            total:      { $sum: 1 },
-            paying:     { $sum: { $cond: [{ $gt: ['$amount_paid', 0] }, 1, 0] } },
-            hasBalance: { $sum: { $cond: [{ $gt: ['$balance',     0] }, 1, 0] } },
-        }},
-      ]),
-    ]);
-
-    const dl             = financials?.payment_deadline ? new Date(financials.payment_deadline) : null;
-    const deadlinePassed = !!(dl && dl < new Date());
-
-    res.json({
-      id:               coach._id,
-      name:             finTeamName(coach),
-      coach:            `${coach.first_name || ''} ${coach.last_name || ''}`.trim() || '—',
-      budget:           round2(latestBudget?.total    ?? 0),
-      budgetedPlayers:  latestBudget?.players          ?? 0,
-      totalCollected:   round2(paymentAgg[0]?.collected ?? 0),
-      balanceRemaining: round2(paymentAgg[0]?.balance   ?? 0),
-      paymentDeadline:  financials?.payment_deadline    || null,
-      deadlinePassed,
-      totalRegistered:  playerStats[0]?.total           ?? 0,
-      goodStanding:     playerStats[0]?.paying          ?? 0,
-      accountsInRed:    deadlinePassed ? (playerStats[0]?.hasBalance ?? 0) : 0,
-    });
-  } catch (err) {
-    console.error('Team detail error:', err);
-    res.status(500).json({ message: 'Failed to load team' });
-  }
-});
-
-// ── GET /api/admin/teams/:coachId/players ────────────────────────
-// Paginated team player list. status filter: all|paid|partial|unpaid|overdue.
-app.get('/api/admin/teams/:coachId/players', requireAdmin, async (req, res) => {
-  try {
-    const { coachId } = req.params;
-    if (!mongoose.isValidObjectId(coachId)) return res.status(400).json({ message: 'Invalid team id' });
-
-    const coachExists = await Coach.exists({ _id: coachId, active: { $ne: false } });
-    if (!coachExists) return res.status(404).json({ message: 'Team not found or inactive' });
-
-    const page    = Math.max(1, parseInt(req.query.page,    10) || 1);
-    const perPage = Math.min(100, Math.max(1, parseInt(req.query.perPage, 10) || 20));
-    const search  = (req.query.search || '').trim();
-    const status  = req.query.status;
-
-    const filter = { coach_id: coachId };
-    if (search) filter.player_name = { $regex: finEscapeRegex(search), $options: 'i' };
-
-    if      (status === 'paid')    { filter.amount_paid = { $gt: 0 }; filter.balance = 0; }
-    else if (status === 'partial') { filter.amount_paid = { $gt: 0 }; filter.balance = { $gt: 0 }; }
-    else if (status === 'unpaid')  { filter.amount_paid = 0; }
-    else if (status === 'overdue') { filter.balance = { $gt: 0 }; }
-
-    const [total, players] = await Promise.all([
-      PlayerPayment.countDocuments(filter),
-      PlayerPayment.find(filter).sort({ player_name: 1 }).skip((page - 1) * perPage).limit(perPage).lean(),
-    ]);
-
-    res.json({
-      players: players.map(p => ({
-        id: p._id, name: p.player_name || '—',
-        totalFee:   round2(p.total_fee),
-        paidAmount: round2(p.amount_paid),
-        balance:    round2(p.balance),
-        status:     finDerivedStatus(p),
-        lastPayment: p.updated_at || null,
-      })),
-      total, page, perPage,
-    });
-  } catch (err) {
-    console.error('Team players error:', err);
-    res.status(500).json({ message: 'Failed to load players' });
-  }
-});
-
-// ── GET /api/admin/teams/:coachId/payouts ────────────────────────
-// Payout history + computed totals for one team.
-app.get('/api/admin/teams/:coachId/payouts', requireAdmin, async (req, res) => {
-  try {
-    const { coachId } = req.params;
-    if (!mongoose.isValidObjectId(coachId)) return res.status(400).json({ message: 'Invalid team id' });
-    const coachExists = await Coach.exists({ _id: coachId, active: { $ne: false } });
-    if (!coachExists) return res.status(404).json({ message: 'Team not found or inactive' });
-    res.json(await finPayoutSummary(coachId));
-  } catch (err) {
-    console.error('Coach payouts GET error:', err);
-    res.status(500).json({ message: 'Failed to load payouts' });
-  }
-});
-
-// ── POST /api/admin/teams/:coachId/payouts ───────────────────────
-// Log a new Ambassadors Baseball → Coach payment.
-// Body: { date: string, amount: number, notes?: string }
-app.post('/api/admin/teams/:coachId/payouts', requireAdmin, async (req, res) => {
-  try {
-    const { coachId } = req.params;
-    if (!mongoose.isValidObjectId(coachId)) return res.status(400).json({ message: 'Invalid team id' });
-    const coachExists = await Coach.exists({ _id: coachId, active: { $ne: false } });
-    if (!coachExists) return res.status(404).json({ message: 'Team not found or inactive' });
-
-    const { date, amount, notes } = req.body;
-    const parsedAmount = parseFloat(amount);
-    if (!date || isNaN(new Date(date).getTime())) return res.status(400).json({ message: 'A valid date is required' });
-    if (!parsedAmount || parsedAmount <= 0)        return res.status(400).json({ message: 'Amount must be a positive number' });
-
-    await CoachPayout.create({
-      coach_id: coachId,
-      date:     new Date(date),
-      amount:   round2(parsedAmount),
-      notes:    (notes || '').trim().slice(0, 500),
-    });
-
-    res.status(201).json(await finPayoutSummary(coachId));
-  } catch (err) {
-    console.error('Coach payouts POST error:', err);
-    res.status(500).json({ message: 'Failed to save payout' });
-  }
-});
-
-// ════════════════════════════════════════════════════════════════
 //  PUBLIC ROUTES
 // ════════════════════════════════════════════════════════════════
 
@@ -3672,8 +3324,281 @@ app.post('/api/registrations/pending', async (req, res) => {
   }
 });
 
-// ── START SERVER ─────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-  console.log(`🚀  Server running on port ${PORT}`);
+// ══════════════════════════════════════════════════════════════════
+//  FINANCIAL MANAGEMENT — ADMIN ROUTES
+//  Read-only aggregates + coach payout recording.
+//  All routes protected by requireAdmin.
+// ══════════════════════════════════════════════════════════════════
+
+const FIN_ORG_FEE_PER_PLAYER = 450; // org's fixed cut per registered player
+const finRound2 = n => Math.round((Number(n) || 0) * 100) / 100;
+function finTeamName(c) {
+  return c.team_name || `${c.first_name || ''} ${c.last_name || ''}`.trim() || 'Unnamed Team';
+}
+function finCoachName(c) {
+  return `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—';
+}
+function finDerivedStatus(p) {
+  const paid = Number(p.amount_paid) || 0;
+  const bal  = Number(p.balance) || 0;
+  if (paid === 0) return 'unpaid';
+  if (bal  === 0) return 'paid';
+  return 'partial';
+}
+function finEscapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+// GET /api/admin/fin/organization-overview
+app.get('/api/admin/fin/organization-overview', requireAdmin, async (req, res) => {
+  try {
+    const activeCoaches = await Coach.find({ active: { $ne: false } }).select('_id').lean();
+    const activeCoachIds = activeCoaches.map(c => c._id);
+    const activeTeams    = activeCoachIds.length;
+    if (activeTeams === 0) {
+      return res.json({ activeTeams: 0, averagePlayerFee: 0, totalCollected: 0, outstanding: 0, payingPlayers: 0, totalPlayers: 0, organizationProfit: 0 });
+    }
+    const [feeAgg, paymentAgg, budgetAgg, payingPlayers] = await Promise.all([
+      TeamFinancials.aggregate([
+        { $match: { coach_id: { $in: activeCoachIds } } },
+        { $group: { _id: null, totalFee: { $sum: '$player_fee' } } },
+      ]),
+      PlayerPayment.aggregate([
+        { $match: { coach_id: { $in: activeCoachIds } } },
+        { $group: { _id: null, collected: { $sum: '$amount_paid' }, outstanding: { $sum: '$balance' } } },
+      ]),
+      Budget.aggregate([
+        { $match: { coach_id: { $in: activeCoachIds } } },
+        { $sort: { created_at: -1 } },
+        { $group: { _id: '$coach_id', players: { $first: '$players' }, ambassadorsFee: { $first: '$ambassadors' } } },
+        { $group: { _id: null, totalPlayers: { $sum: '$players' }, organizationProfit: { $sum: '$ambassadorsFee' } } },
+      ]),
+      PlayerPayment.countDocuments({ coach_id: { $in: activeCoachIds }, amount_paid: { $gt: 0 } }),
+    ]);
+    res.json({
+      activeTeams,
+      averagePlayerFee:   finRound2((feeAgg[0]?.totalFee ?? 0) / activeTeams),
+      totalCollected:     finRound2(paymentAgg[0]?.collected ?? 0),
+      outstanding:        finRound2(paymentAgg[0]?.outstanding ?? 0),
+      payingPlayers,
+      totalPlayers:       budgetAgg[0]?.totalPlayers ?? 0,
+      organizationProfit: finRound2(budgetAgg[0]?.organizationProfit ?? 0),
+    });
+  } catch (err) {
+    console.error('fin org overview error:', err);
+    res.status(500).json({ message: 'Failed to load organization overview' });
+  }
 });
+
+// GET /api/admin/fin/teams  — lightweight list for dropdown
+app.get('/api/admin/fin/teams', requireAdmin, async (req, res) => {
+  try {
+    const coaches = await Coach.find({ active: { $ne: false } }).select('_id first_name last_name team_name').lean();
+    const teams = coaches
+      .map(c => ({ id: c._id, name: finTeamName(c), coach: finCoachName(c) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ teams });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to load teams' });
+  }
+});
+
+// GET /api/admin/fin/team-rankings?sortBy=budget|balance|completed
+app.get('/api/admin/fin/team-rankings', requireAdmin, async (req, res) => {
+  try {
+    const sortBy = String(req.query.sortBy || 'budget');
+    if (!['budget', 'balance', 'completed'].includes(sortBy)) {
+      return res.status(400).json({ message: 'Invalid sortBy' });
+    }
+    const activeCoaches  = await Coach.find({ active: { $ne: false } }).select('_id first_name last_name team_name').lean();
+    const activeCoachIds = activeCoaches.map(c => c._id);
+    if (activeCoachIds.length === 0) return res.json({ rankings: [] });
+    const [budgets, payments] = await Promise.all([
+      Budget.aggregate([
+        { $match: { coach_id: { $in: activeCoachIds } } },
+        { $sort: { created_at: -1 } },
+        { $group: { _id: '$coach_id', total: { $first: '$total' } } },
+      ]),
+      PlayerPayment.aggregate([
+        { $match: { coach_id: { $in: activeCoachIds } } },
+        { $group: { _id: '$coach_id', collected: { $sum: '$amount_paid' }, balance: { $sum: '$balance' } } },
+      ]),
+    ]);
+    const budgetByCoach  = Object.fromEntries(budgets .map(b => [String(b._id), b.total]));
+    const paymentByCoach = Object.fromEntries(payments.map(p => [String(p._id), p]));
+    const rows = activeCoaches.map(c => {
+      const budget    = finRound2(budgetByCoach[String(c._id)] ?? 0);
+      const p         = paymentByCoach[String(c._id)] || { collected: 0, balance: 0 };
+      const collected = finRound2(p.collected);
+      const balance   = finRound2(p.balance);
+      const percentCollected = budget > 0 ? finRound2(Math.min(100, (collected / budget) * 100)) : 0;
+      const completed = budget > 0 && collected >= budget;
+      return { id: c._id, name: finTeamName(c), coach: finCoachName(c), budget, collected, balance, percentCollected, completed };
+    });
+    if (sortBy === 'budget')     rows.sort((a, b) => b.budget    - a.budget    || a.name.localeCompare(b.name));
+    else if (sortBy === 'balance') rows.sort((a, b) => b.balance  - a.balance  || a.name.localeCompare(b.name));
+    else rows.sort((a, b) => { if (a.completed !== b.completed) return a.completed ? -1 : 1; return b.collected - a.collected || a.name.localeCompare(b.name); });
+    res.json({ rankings: rows });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to load team rankings' });
+  }
+});
+
+// GET /api/admin/fin/teams/:coachId  — team financial metrics
+app.get('/api/admin/fin/teams/:coachId', requireAdmin, async (req, res) => {
+  try {
+    const { coachId } = req.params;
+    if (!mongoose.isValidObjectId(coachId)) return res.status(400).json({ message: 'Invalid team id' });
+    const coach = await Coach.findOne({ _id: coachId, active: { $ne: false } }).select('_id first_name last_name team_name').lean();
+    if (!coach) return res.status(404).json({ message: 'Team not found' });
+    const coachObjId = new mongoose.Types.ObjectId(coachId);
+    const [financials, latestBudget, paymentAgg, playerStats] = await Promise.all([
+      TeamFinancials.findOne({ coach_id: coachId }).select('payment_deadline').lean(),
+      Budget.findOne({ coach_id: coachId }).sort({ created_at: -1 }).select('total players').lean(),
+      PlayerPayment.aggregate([
+        { $match: { coach_id: coachObjId } },
+        { $group: { _id: null, collected: { $sum: '$amount_paid' }, balance: { $sum: '$balance' } } },
+      ]),
+      PlayerPayment.aggregate([
+        { $match: { coach_id: coachObjId } },
+        { $group: { _id: null, total: { $sum: 1 }, paying: { $sum: { $cond: [{ $gt: ['$amount_paid', 0] }, 1, 0] } }, hasBalance: { $sum: { $cond: [{ $gt: ['$balance', 0] }, 1, 0] } } } },
+      ]),
+    ]);
+    const dl = financials?.payment_deadline ? new Date(financials.payment_deadline) : null;
+    const deadlinePassed = !!(dl && dl < new Date());
+    const accountsInRed  = deadlinePassed ? (playerStats[0]?.hasBalance ?? 0) : 0;
+    res.json({
+      id: coach._id, name: finTeamName(coach), coach: finCoachName(coach),
+      budget:           finRound2(latestBudget?.total    ?? 0),
+      budgetedPlayers:  latestBudget?.players             ?? 0,
+      totalCollected:   finRound2(paymentAgg[0]?.collected ?? 0),
+      balanceRemaining: finRound2(paymentAgg[0]?.balance   ?? 0),
+      paymentDeadline:  financials?.payment_deadline       || null,
+      deadlinePassed,
+      totalRegistered:  playerStats[0]?.total             ?? 0,
+      goodStanding:     playerStats[0]?.paying            ?? 0,
+      accountsInRed,
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to load team' });
+  }
+});
+
+// GET /api/admin/fin/teams/:coachId/players?page&perPage&search&status
+app.get('/api/admin/fin/teams/:coachId/players', requireAdmin, async (req, res) => {
+  try {
+    const { coachId } = req.params;
+    if (!mongoose.isValidObjectId(coachId)) return res.status(400).json({ message: 'Invalid team id' });
+    const coachExists = await Coach.exists({ _id: coachId, active: { $ne: false } });
+    if (!coachExists) return res.status(404).json({ message: 'Team not found' });
+    const page    = Math.max(1, parseInt(req.query.page,    10) || 1);
+    const perPage = Math.min(100, Math.max(1, parseInt(req.query.perPage, 10) || 20));
+    const search  = (req.query.search || '').trim();
+    const status  = req.query.status;
+    const filter  = { coach_id: coachId };
+    if (search) filter.player_name = { $regex: finEscapeRegex(search), $options: 'i' };
+    if      (status === 'paid')    { filter.amount_paid = { $gt: 0 }; filter.balance = 0; }
+    else if (status === 'partial') { filter.amount_paid = { $gt: 0 }; filter.balance = { $gt: 0 }; }
+    else if (status === 'unpaid')  { filter.amount_paid = 0; }
+    else if (status === 'overdue') { filter.balance = { $gt: 0 }; }
+    const [total, players] = await Promise.all([
+      PlayerPayment.countDocuments(filter),
+      PlayerPayment.find(filter).sort({ player_name: 1 }).skip((page - 1) * perPage).limit(perPage).lean(),
+    ]);
+    res.json({
+      players: players.map(p => ({
+        id: p._id, name: p.player_name || '—',
+        totalFee:    finRound2(p.total_fee),
+        paidAmount:  finRound2(p.amount_paid),
+        balance:     finRound2(p.balance),
+        status:      finDerivedStatus(p),
+        lastPayment: p.updated_at || null,
+      })),
+      total, page, perPage,
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to load players' });
+  }
+});
+
+// GET /api/admin/fin/outstanding-balances?page&perPage
+app.get('/api/admin/fin/outstanding-balances', requireAdmin, async (req, res) => {
+  try {
+    const page    = Math.max(1, parseInt(req.query.page,    10) || 1);
+    const perPage = Math.min(100, Math.max(1, parseInt(req.query.perPage, 10) || 20));
+    const activeCoaches = await Coach.find({ active: { $ne: false } }).select('_id team_name first_name last_name').lean();
+    const activeCoachIds = activeCoaches.map(c => c._id);
+    if (activeCoachIds.length === 0) return res.json({ players: [], total: 0, page, perPage });
+    const teamNameMap = Object.fromEntries(activeCoaches.map(c => [String(c._id), finTeamName(c)]));
+    const filter = { coach_id: { $in: activeCoachIds }, balance: { $gt: 0 } };
+    const [total, players] = await Promise.all([
+      PlayerPayment.countDocuments(filter),
+      PlayerPayment.find(filter).sort({ balance: -1, player_name: 1 }).skip((page - 1) * perPage).limit(perPage).lean(),
+    ]);
+    res.json({
+      players: players.map(p => ({
+        id: p._id, name: p.player_name || '—',
+        team:       teamNameMap[String(p.coach_id)] || '—',
+        totalFee:   finRound2(p.total_fee),
+        paidAmount: finRound2(p.amount_paid),
+        balance:    finRound2(p.balance),
+        status:     finDerivedStatus(p),
+      })),
+      total, page, perPage,
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to load outstanding balances' });
+  }
+});
+
+// GET /api/admin/fin/teams/:coachId/payouts
+app.get('/api/admin/fin/teams/:coachId/payouts', requireAdmin, async (req, res) => {
+  try {
+    const { coachId } = req.params;
+    if (!mongoose.isValidObjectId(coachId)) return res.status(400).json({ message: 'Invalid team id' });
+    const coachExists = await Coach.exists({ _id: coachId, active: { $ne: false } });
+    if (!coachExists) return res.status(404).json({ message: 'Team not found' });
+    res.json(await finGetPayoutSummary(coachId));
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to load payouts' });
+  }
+});
+
+// POST /api/admin/fin/teams/:coachId/payouts
+app.post('/api/admin/fin/teams/:coachId/payouts', requireAdmin, async (req, res) => {
+  try {
+    const { coachId } = req.params;
+    if (!mongoose.isValidObjectId(coachId)) return res.status(400).json({ message: 'Invalid team id' });
+    const coachExists = await Coach.exists({ _id: coachId, active: { $ne: false } });
+    if (!coachExists) return res.status(404).json({ message: 'Team not found' });
+    const { date, amount, notes } = req.body;
+    const parsedAmount = parseFloat(amount);
+    if (!date || isNaN(new Date(date).getTime())) return res.status(400).json({ message: 'A valid date is required' });
+    if (!parsedAmount || parsedAmount <= 0) return res.status(400).json({ message: 'Amount must be a positive number' });
+    await CoachPayout.create({ coach_id: coachId, date: new Date(date), amount: finRound2(parsedAmount), notes: (notes || '').trim().slice(0, 500) });
+    res.status(201).json(await finGetPayoutSummary(coachId));
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to save payout' });
+  }
+});
+
+async function finGetPayoutSummary(coachId) {
+  const coachObjId = new mongoose.Types.ObjectId(coachId);
+  const [owedAgg, payouts] = await Promise.all([
+    PlayerPayment.aggregate([
+      { $match: { coach_id: coachObjId, amount_paid: { $gt: 0 } } },
+      { $group: { _id: null, totalOwed: { $sum: { $max: [{ $subtract: ['$total_fee', FIN_ORG_FEE_PER_PLAYER] }, 0] } } } },
+    ]),
+    CoachPayout.find({ coach_id: coachId }).sort({ date: -1 }).lean(),
+  ]);
+  const totalOwedToCoach = finRound2(owedAgg[0]?.totalOwed ?? 0);
+  const totalPaidToCoach = finRound2(payouts.reduce((s, p) => s + p.amount, 0));
+  return {
+    totalOwedToCoach,
+    totalPaidToCoach,
+    balanceToBePaid:  finRound2(totalOwedToCoach - totalPaidToCoach),
+    orgFeePerPlayer:  FIN_ORG_FEE_PER_PLAYER,
+    payouts: payouts.map(p => ({ id: p._id, date: p.date, amount: p.amount, notes: p.notes || '' })),
+  };
+}
+
+// ── VERCEL SERVERLESS EXPORT ────────────────────────────────────────────────
+module.exports = app;
