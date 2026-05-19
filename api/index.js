@@ -3600,5 +3600,90 @@ async function finGetPayoutSummary(coachId) {
   };
 }
 
+
+// ── COACH FINANCIAL DASHBOARD ROUTES ─────────────────────────────
+// Protected by requireAuth (coach JWT). Coach sees only their own team.
+// No payout data exposed — that is admin-only.
+
+// GET /api/coach/fin/overview
+app.get('/api/coach/fin/overview', requireAuth, async (req, res) => {
+  try {
+    const coachId    = req.coachId;
+    const coachObjId = new mongoose.Types.ObjectId(coachId);
+    const [coach, financials, latestBudget, paymentAgg, playerStats] = await Promise.all([
+      Coach.findById(coachId).select('first_name last_name team_name').lean(),
+      TeamFinancials.findOne({ coach_id: coachId }).select('payment_deadline').lean(),
+      Budget.findOne({ coach_id: coachId }).sort({ created_at: -1 }).select('total players').lean(),
+      PlayerPayment.aggregate([
+        { $match: { coach_id: coachObjId } },
+        { $group: { _id: null, collected: { $sum: '$amount_paid' }, balance: { $sum: '$balance' } } },
+      ]),
+      PlayerPayment.aggregate([
+        { $match: { coach_id: coachObjId } },
+        { $group: { _id: null, total: { $sum: 1 }, paying: { $sum: { $cond: [{ $gt: ['$amount_paid', 0] }, 1, 0] } }, hasBalance: { $sum: { $cond: [{ $gt: ['$balance', 0] }, 1, 0] } } } },
+      ]),
+    ]);
+    if (!coach) return res.status(404).json({ message: 'Coach not found' });
+    const teamName   = coach.team_name || `${coach.first_name || ''} ${coach.last_name || ''}`.trim() || 'My Team';
+    const coachName  = `${coach.first_name || ''} ${coach.last_name || ''}`.trim() || '—';
+    const dl         = financials?.payment_deadline ? new Date(financials.payment_deadline) : null;
+    const deadlinePassed = !!(dl && dl < new Date());
+    const accountsInRed  = deadlinePassed ? (playerStats[0]?.hasBalance ?? 0) : 0;
+    res.json({
+      id:               coachId,
+      name:             teamName,
+      coach:            coachName,
+      budget:           finRound2(latestBudget?.total    ?? 0),
+      budgetedPlayers:  latestBudget?.players             ?? 0,
+      totalCollected:   finRound2(paymentAgg[0]?.collected ?? 0),
+      balanceRemaining: finRound2(paymentAgg[0]?.balance   ?? 0),
+      paymentDeadline:  financials?.payment_deadline       || null,
+      deadlinePassed,
+      totalRegistered:  playerStats[0]?.total             ?? 0,
+      goodStanding:     playerStats[0]?.paying            ?? 0,
+      accountsInRed,
+    });
+  } catch (err) {
+    console.error('coach fin overview error:', err);
+    res.status(500).json({ message: 'Failed to load financial overview' });
+  }
+});
+
+// GET /api/coach/fin/players?page&perPage&search&status
+app.get('/api/coach/fin/players', requireAuth, async (req, res) => {
+  try {
+    const coachId = req.coachId;
+    const page    = Math.max(1, parseInt(req.query.page,    10) || 1);
+    const perPage = Math.min(100, Math.max(1, parseInt(req.query.perPage, 10) || 20));
+    const search  = (req.query.search || '').trim();
+    const status  = req.query.status;
+    const filter  = { coach_id: coachId };
+    if (search) filter.player_name = { $regex: finEscapeRegex(search), $options: 'i' };
+    if      (status === 'paid')    { filter.amount_paid = { $gt: 0 }; filter.balance = 0; }
+    else if (status === 'partial') { filter.amount_paid = { $gt: 0 }; filter.balance = { $gt: 0 }; }
+    else if (status === 'unpaid')  { filter.amount_paid = 0; }
+    else if (status === 'overdue') { filter.balance = { $gt: 0 }; }
+    const [total, players] = await Promise.all([
+      PlayerPayment.countDocuments(filter),
+      PlayerPayment.find(filter).sort({ player_name: 1 }).skip((page - 1) * perPage).limit(perPage).lean(),
+    ]);
+    res.json({
+      players: players.map(p => ({
+        id:          p._id,
+        name:        p.player_name || '—',
+        totalFee:    finRound2(p.total_fee),
+        paidAmount:  finRound2(p.amount_paid),
+        balance:     finRound2(p.balance),
+        status:      finDerivedStatus(p),
+        lastPayment: p.updated_at || null,
+      })),
+      total, page, perPage,
+    });
+  } catch (err) {
+    console.error('coach fin players error:', err);
+    res.status(500).json({ message: 'Failed to load players' });
+  }
+});
+
 // ── VERCEL SERVERLESS EXPORT ────────────────────────────────────────────────
 module.exports = app;
