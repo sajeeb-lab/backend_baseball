@@ -3356,11 +3356,11 @@ app.get('/api/admin/fin/organization-overview', requireAdmin, async (req, res) =
     if (activeTeams === 0) {
       return res.json({ activeTeams: 0, averagePlayerFee: 0, totalCollected: 0, outstanding: 0, payingPlayers: 0, totalPlayers: 0, organizationProfit: 0 });
     }
-    const [budgets, paymentAgg, playerStats, payingPlayersByTeam] = await Promise.all([
+    const [budgets, paymentAgg, playerStats] = await Promise.all([
       Budget.aggregate([
         { $match: { coach_id: { $in: activeCoachIds } } },
         { $sort: { created_at: -1 } },
-        { $group: { _id: '$coach_id', total: { $first: '$total' } } },
+        { $group: { _id: '$coach_id', total: { $first: '$total' }, players: { $first: '$players' } } },
       ]),
       PlayerPayment.aggregate([
         { $match: { coach_id: { $in: activeCoachIds } } },
@@ -3378,26 +3378,18 @@ app.get('/api/admin/fin/organization-overview', requireAdmin, async (req, res) =
             fullyPaid:   { $sum: { $cond: [{ $and: [{ $eq: ['$balance', 0] }, { $gt: ['$amount_paid', 0] }] }, 1, 0] } },
         }},
       ]),
-      // Get paying players count per team (players with amount_paid > 0)
-      PlayerPayment.aggregate([
-        { $match: { coach_id: { $in: activeCoachIds }, amount_paid: { $gt: 0 } } },
-        { $group: { _id: '$coach_id', count: { $sum: 1 } } },
-      ]),
     ]);
     
-    // Calculate average player fee: for each team (Budget ÷ Paying Players), then average across teams
-    const budgetByCoach = Object.fromEntries(budgets.map(b => [String(b._id), b.total]));
-    const payingByCoach = Object.fromEntries(payingPlayersByTeam.map(p => [String(p._id), p.count]));
-    
+    // Calculate average player fee: for each team (Budget ÷ Paying Players from budget submission), then average across teams
     let totalPlayerFees = 0;
     let teamsWithValidFee = 0;
     
-    activeCoachIds.forEach(coachId => {
-      const budget = budgetByCoach[String(coachId)] ?? 0;
-      const payingPlayers = payingByCoach[String(coachId)] ?? 0;
+    budgets.forEach(budget => {
+      const budgetTotal = budget.total ?? 0;
+      const payingPlayers = budget.players ?? 0;
       
-      if (budget > 0 && payingPlayers > 0) {
-        totalPlayerFees += budget / payingPlayers;
+      if (budgetTotal > 0 && payingPlayers > 0) {
+        totalPlayerFees += budgetTotal / payingPlayers;
         teamsWithValidFee++;
       }
     });
