@@ -3356,7 +3356,7 @@ app.get('/api/admin/fin/organization-overview', requireAdmin, async (req, res) =
     if (activeTeams === 0) {
       return res.json({ activeTeams: 0, averagePlayerFee: 0, totalCollected: 0, outstanding: 0, payingPlayers: 0, totalPlayers: 0, organizationProfit: 0 });
     }
-    const [feeAgg, paymentAgg, budgetAgg, payingPlayers] = await Promise.all([
+    const [feeAgg, paymentAgg, playerStats] = await Promise.all([
       TeamFinancials.aggregate([
         { $match: { coach_id: { $in: activeCoachIds } } },
         { $group: { _id: null, totalFee: { $sum: '$player_fee' } } },
@@ -3365,22 +3365,31 @@ app.get('/api/admin/fin/organization-overview', requireAdmin, async (req, res) =
         { $match: { coach_id: { $in: activeCoachIds } } },
         { $group: { _id: null, collected: { $sum: '$amount_paid' }, outstanding: { $sum: '$balance' } } },
       ]),
-      Budget.aggregate([
+      // totalRegistered: all PlayerPayment docs
+      // fullyPaid: balance = 0 AND amount_paid > 0
+      // notFullyPaid = totalRegistered - fullyPaid
+      // organizationProfit = totalRegistered * 450
+      PlayerPayment.aggregate([
         { $match: { coach_id: { $in: activeCoachIds } } },
-        { $sort: { created_at: -1 } },
-        { $group: { _id: '$coach_id', players: { $first: '$players' }, ambassadorsFee: { $first: '$ambassadors' } } },
-        { $group: { _id: null, totalPlayers: { $sum: '$players' }, organizationProfit: { $sum: '$ambassadorsFee' } } },
+        { $group: {
+            _id:         null,
+            total:       { $sum: 1 },
+            fullyPaid:   { $sum: { $cond: [{ $and: [{ $eq: ['$balance', 0] }, { $gt: ['$amount_paid', 0] }] }, 1, 0] } },
+        }},
       ]),
-      PlayerPayment.countDocuments({ coach_id: { $in: activeCoachIds }, amount_paid: { $gt: 0 } }),
     ]);
+    const totalRegistered  = playerStats[0]?.total     ?? 0;
+    const fullyPaid        = playerStats[0]?.fullyPaid ?? 0;
+    const notFullyPaid     = totalRegistered - fullyPaid;
+    const organizationProfit = finRound2(totalRegistered * 450);
     res.json({
       activeTeams,
       averagePlayerFee:   finRound2((feeAgg[0]?.totalFee ?? 0) / activeTeams),
       totalCollected:     finRound2(paymentAgg[0]?.collected ?? 0),
       outstanding:        finRound2(paymentAgg[0]?.outstanding ?? 0),
-      payingPlayers,
-      totalPlayers:       budgetAgg[0]?.totalPlayers ?? 0,
-      organizationProfit: finRound2(budgetAgg[0]?.organizationProfit ?? 0),
+      notFullyPaid,
+      totalRegistered,
+      organizationProfit,
     });
   } catch (err) {
     console.error('fin org overview error:', err);
