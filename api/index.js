@@ -3475,8 +3475,7 @@ app.get('/api/admin/fin/team-rankings', requireAdmin, async (req, res) => {
     } else if (sortBy === 'balance') {
       rows.sort((a, b) => b.balance - a.balance || a.name.localeCompare(b.name));
     } else {
-      // For 'completed': filter to show only teams with 100% budget completion, then sort by percentage
-      rows = rows.filter(r => r.completed);
+      // For 'completed': sort all teams by % collected descending (highest % = top rank)
       rows.sort((a, b) => b.percentCollected - a.percentCollected || a.name.localeCompare(b.name));
     }
     res.json({ rankings: rows });
