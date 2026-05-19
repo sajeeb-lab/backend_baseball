@@ -3356,10 +3356,11 @@ app.get('/api/admin/fin/organization-overview', requireAdmin, async (req, res) =
     if (activeTeams === 0) {
       return res.json({ activeTeams: 0, averagePlayerFee: 0, totalCollected: 0, outstanding: 0, payingPlayers: 0, totalPlayers: 0, organizationProfit: 0 });
     }
-    const [feeAgg, paymentAgg, playerStats] = await Promise.all([
-      TeamFinancials.aggregate([
+    const [budgets, paymentAgg, playerStats, payingPlayersByTeam] = await Promise.all([
+      Budget.aggregate([
         { $match: { coach_id: { $in: activeCoachIds } } },
-        { $group: { _id: null, totalFee: { $sum: '$player_fee' } } },
+        { $sort: { created_at: -1 } },
+        { $group: { _id: '$coach_id', total: { $first: '$total' } } },
       ]),
       PlayerPayment.aggregate([
         { $match: { coach_id: { $in: activeCoachIds } } },
@@ -3377,14 +3378,39 @@ app.get('/api/admin/fin/organization-overview', requireAdmin, async (req, res) =
             fullyPaid:   { $sum: { $cond: [{ $and: [{ $eq: ['$balance', 0] }, { $gt: ['$amount_paid', 0] }] }, 1, 0] } },
         }},
       ]),
+      // Get paying players count per team (players with amount_paid > 0)
+      PlayerPayment.aggregate([
+        { $match: { coach_id: { $in: activeCoachIds }, amount_paid: { $gt: 0 } } },
+        { $group: { _id: '$coach_id', count: { $sum: 1 } } },
+      ]),
     ]);
+    
+    // Calculate average player fee: for each team (Budget ÷ Paying Players), then average across teams
+    const budgetByCoach = Object.fromEntries(budgets.map(b => [String(b._id), b.total]));
+    const payingByCoach = Object.fromEntries(payingPlayersByTeam.map(p => [String(p._id), p.count]));
+    
+    let totalPlayerFees = 0;
+    let teamsWithValidFee = 0;
+    
+    activeCoachIds.forEach(coachId => {
+      const budget = budgetByCoach[String(coachId)] ?? 0;
+      const payingPlayers = payingByCoach[String(coachId)] ?? 0;
+      
+      if (budget > 0 && payingPlayers > 0) {
+        totalPlayerFees += budget / payingPlayers;
+        teamsWithValidFee++;
+      }
+    });
+    
+    const averagePlayerFee = teamsWithValidFee > 0 ? finRound2(totalPlayerFees / teamsWithValidFee) : 0;
+    
     const totalRegistered  = playerStats[0]?.total     ?? 0;
     const fullyPaid        = playerStats[0]?.fullyPaid ?? 0;
     const notFullyPaid     = totalRegistered - fullyPaid;
     const organizationProfit = finRound2(totalRegistered * 450);
     res.json({
       activeTeams,
-      averagePlayerFee:   finRound2((feeAgg[0]?.totalFee ?? 0) / activeTeams),
+      averagePlayerFee,
       totalCollected:     finRound2(paymentAgg[0]?.collected ?? 0),
       outstanding:        finRound2(paymentAgg[0]?.outstanding ?? 0),
       notFullyPaid,
