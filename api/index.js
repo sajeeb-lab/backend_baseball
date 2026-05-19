@@ -3452,13 +3452,22 @@ app.get('/api/admin/fin/team-rankings', requireAdmin, async (req, res) => {
     const budgetByCoach  = Object.fromEntries(budgets .map(b => [String(b._id), b.total]));
     const paymentByCoach = Object.fromEntries(payments.map(p => [String(p._id), p]));
     let rows = activeCoaches.map(c => {
-      const budget    = finRound2(budgetByCoach[String(c._id)] ?? 0);
-      const p         = paymentByCoach[String(c._id)] || { collected: 0, balance: 0 };
-      const collected = finRound2(p.collected);
-      const balance   = finRound2(p.balance);
-      const percentCollected = budget > 0 ? finRound2(Math.min(100, (collected / budget) * 100)) : 0;
-      const completed = budget > 0 && collected >= budget;
-      return { id: c._id, name: finTeamName(c), coach: finCoachName(c), budget, collected, balance, percentCollected, completed };
+      const budgetRaw    = budgetByCoach[String(c._id)] ?? 0;
+      const p            = paymentByCoach[String(c._id)] || { collected: 0, balance: 0 };
+      const collectedRaw = p.collected;
+      const balanceRaw   = p.balance;
+      const percentCollected = budgetRaw > 0 ? finRound2(Math.min(100, (collectedRaw / budgetRaw) * 100)) : 0;
+      const completed = budgetRaw > 0 && collectedRaw >= budgetRaw;
+      return { 
+        id: c._id, 
+        name: finTeamName(c), 
+        coach: finCoachName(c), 
+        budget: finRound2(budgetRaw), 
+        collected: finRound2(collectedRaw), 
+        balance: finRound2(balanceRaw), 
+        percentCollected, 
+        completed 
+      };
     });
     // Filter and sort based on sortBy parameter
     if (sortBy === 'budget') {
