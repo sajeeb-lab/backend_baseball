@@ -275,7 +275,7 @@ I'm excited for the journey ahead. You will be receiving a series of emails from
 With gratitude,
 Mark Helsel aka "Coach Mark"
 Founder, Ambassadors Baseball
-Email: mark@markhelsel.com
+Email: sajeeb@appsus.io
 Phone: 814-502-9799`;
 
   // HTML version — same content, light formatting.
@@ -321,7 +321,7 @@ Phone: 814-502-9799`;
             <p style="margin:0 0 10px;color:#5a6a7a;font-style:italic;font-size:14px;">aka "Coach Mark"</p>
             <p style="margin:0 0 14px;color:#0a1628;font-weight:600;font-size:14px;">Founder, Ambassadors Baseball</p>
             <p style="margin:0;font-size:14px;color:#5a6a7a;">
-              Email: <a href="mailto:mark@markhelsel.com" style="color:#c8102e;text-decoration:none;font-weight:600;">mark@markhelsel.com</a>
+              Email: <a href="mailto:sajeeb@appsus.io" style="color:#c8102e;text-decoration:none;font-weight:600;">sajeeb@appsus.io</a>
               <span style="margin:0 10px;color:#dce3ec;">|</span>
               Phone: <a href="tel:8145029799" style="color:#5a6a7a;text-decoration:none;">814-502-9799</a>
             </p>
@@ -700,7 +700,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
               await sendPaymentNotificationEmail({
                 ...tablePayload,
                 subject:    staffSubject,
-                recipients: 'jahirul@appsus.io, mark@markhelsel.com',
+                recipients: 'jahirul@appsus.io, sajeeb@appsus.io',
               });
             } catch (e) { console.error('⚠️  Staff notification email error:', e.message); }
 
@@ -838,7 +838,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
             await sendCoachTryoutNotificationEmail({
               ...tryoutPayload,
               subject:    markSubject,
-              recipients: 'mark@markhelsel.com',
+              recipients: 'sajeeb@appsus.io',
             });
           } catch (e) { console.error('⚠️  Coach tryout email error (paid, mark):', e.message); }
         }
@@ -3267,7 +3267,7 @@ app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
       await sendCoachTryoutNotificationEmail({
         ...tryoutPayload,
         subject:    markSubject,
-        recipients: 'mark@markhelsel.com',
+        recipients: 'sajeeb@appsus.io',
       });
     } catch (e) { console.error('⚠️  Coach tryout email error (free, mark):', e.message); }
 
