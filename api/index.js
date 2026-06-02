@@ -3665,6 +3665,46 @@ app.post('/api/admin/fin/teams/:coachId/payouts', requireAdmin, async (req, res)
   }
 });
 
+// PUT /api/admin/fin/teams/:coachId/payouts/:payoutId
+app.put('/api/admin/fin/teams/:coachId/payouts/:payoutId', requireAdmin, async (req, res) => {
+  try {
+    const { coachId, payoutId } = req.params;
+    if (!mongoose.isValidObjectId(coachId))  return res.status(400).json({ message: 'Invalid team id' });
+    if (!mongoose.isValidObjectId(payoutId)) return res.status(400).json({ message: 'Invalid payout id' });
+    const coachExists = await Coach.exists({ _id: coachId, active: { $ne: false } });
+    if (!coachExists) return res.status(404).json({ message: 'Team not found' });
+    const { date, amount, notes } = req.body;
+    const parsedAmount = parseFloat(amount);
+    if (!date || isNaN(new Date(date).getTime())) return res.status(400).json({ message: 'A valid date is required' });
+    if (!parsedAmount || parsedAmount <= 0) return res.status(400).json({ message: 'Amount must be a positive number' });
+    const updated = await CoachPayout.findOneAndUpdate(
+      { _id: payoutId, coach_id: coachId },
+      { date: new Date(date), amount: finRound2(parsedAmount), notes: (notes || '').trim().slice(0, 500) },
+      { new: true }
+    );
+    if (!updated) return res.status(404).json({ message: 'Payment not found' });
+    res.json(await finGetPayoutSummary(coachId));
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to update payout' });
+  }
+});
+
+// DELETE /api/admin/fin/teams/:coachId/payouts/:payoutId
+app.delete('/api/admin/fin/teams/:coachId/payouts/:payoutId', requireAdmin, async (req, res) => {
+  try {
+    const { coachId, payoutId } = req.params;
+    if (!mongoose.isValidObjectId(coachId))  return res.status(400).json({ message: 'Invalid team id' });
+    if (!mongoose.isValidObjectId(payoutId)) return res.status(400).json({ message: 'Invalid payout id' });
+    const coachExists = await Coach.exists({ _id: coachId, active: { $ne: false } });
+    if (!coachExists) return res.status(404).json({ message: 'Team not found' });
+    const deleted = await CoachPayout.findOneAndDelete({ _id: payoutId, coach_id: coachId });
+    if (!deleted) return res.status(404).json({ message: 'Payment not found' });
+    res.json(await finGetPayoutSummary(coachId));
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to delete payout' });
+  }
+});
+
 async function finGetPayoutSummary(coachId) {
   const coachObjId = new mongoose.Types.ObjectId(coachId);
   const [owedAgg, payouts] = await Promise.all([
@@ -3771,6 +3811,16 @@ app.get('/api/coach/fin/players', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('coach fin players error:', err);
     res.status(500).json({ message: 'Failed to load players' });
+  }
+});
+
+// GET /api/coach/fin/payouts  — read-only; coach sees only their own payouts
+app.get('/api/coach/fin/payouts', requireAuth, async (req, res) => {
+  try {
+    res.json(await finGetPayoutSummary(req.coachId));
+  } catch (err) {
+    console.error('coach fin payouts error:', err);
+    res.status(500).json({ message: 'Failed to load payouts' });
   }
 });
 
