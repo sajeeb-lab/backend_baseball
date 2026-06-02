@@ -275,7 +275,7 @@ I'm excited for the journey ahead. You will be receiving a series of emails from
 With gratitude,
 Mark Helsel aka "Coach Mark"
 Founder, Ambassadors Baseball
-Email: sajeeb@appsus.io
+Email: mark@markhelsel.com
 Phone: 814-502-9799`;
 
   // HTML version — same content, light formatting.
@@ -321,7 +321,7 @@ Phone: 814-502-9799`;
             <p style="margin:0 0 10px;color:#5a6a7a;font-style:italic;font-size:14px;">aka "Coach Mark"</p>
             <p style="margin:0 0 14px;color:#0a1628;font-weight:600;font-size:14px;">Founder, Ambassadors Baseball</p>
             <p style="margin:0;font-size:14px;color:#5a6a7a;">
-              Email: <a href="mailto:sajeeb@appsus.io" style="color:#c8102e;text-decoration:none;font-weight:600;">sajeeb@appsus.io</a>
+              Email: <a href="mailto:mark@markhelsel.com" style="color:#c8102e;text-decoration:none;font-weight:600;">mark@markhelsel.com</a>
               <span style="margin:0 10px;color:#dce3ec;">|</span>
               Phone: <a href="tel:8145029799" style="color:#5a6a7a;text-decoration:none;">814-502-9799</a>
             </p>
@@ -700,7 +700,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
               await sendPaymentNotificationEmail({
                 ...tablePayload,
                 subject:    staffSubject,
-                recipients: 'jahirul@appsus.io, sajeeb@appsus.io',
+                recipients: 'jahirul@appsus.io, mark@markhelsel.com',
               });
             } catch (e) { console.error('⚠️  Staff notification email error:', e.message); }
 
@@ -838,7 +838,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
             await sendCoachTryoutNotificationEmail({
               ...tryoutPayload,
               subject:    markSubject,
-              recipients: 'sajeeb@appsus.io',
+              recipients: 'mark@markhelsel.com',
             });
           } catch (e) { console.error('⚠️  Coach tryout email error (paid, mark):', e.message); }
         }
@@ -1053,28 +1053,10 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 
 app.use(express.json({ limit: '10mb' }));
 
-// ── MONGODB CONNECTION (serverless-safe cached connection) ────────
-// Vercel spins up a new function instance per request but reuses the
-// Node process across warm invocations. Caching the promise avoids
-// opening a new connection on every request while still handling the
-// case where mongoose.connection is not yet ready.
-let _mongoConnPromise = null;
-function ensureMongoConnected() {
-  if (mongoose.connection.readyState === 1) return Promise.resolve();
-  if (!_mongoConnPromise) {
-    _mongoConnPromise = mongoose
-      .connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10000 })
-      .then(() => { console.log('\u2705  MongoDB connected'); })
-      .catch(err => { _mongoConnPromise = null; throw err; });
-  }
-  return _mongoConnPromise;
-}
-
-// Middleware that ensures DB is ready before every request
-app.use(async (req, res, next) => {
-  try { await ensureMongoConnected(); next(); }
-  catch (err) { console.error('\u274c  MongoDB connection error:', err); res.status(503).json({ message: 'Database unavailable' }); }
-});
+// ── MONGODB CONNECTION ────────────────────────────────────────────
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('✅  MongoDB connected'))
+  .catch(err => { console.error('❌  MongoDB connection error:', err); process.exit(1); });
 
 // ════════════════════════════════════════════════════════════════
 //  MONGOOSE SCHEMAS & MODELS
@@ -3267,7 +3249,7 @@ app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
       await sendCoachTryoutNotificationEmail({
         ...tryoutPayload,
         subject:    markSubject,
-        recipients: 'sajeeb@appsus.io',
+        recipients: 'mark@markhelsel.com',
       });
     } catch (e) { console.error('⚠️  Coach tryout email error (free, mark):', e.message); }
 
@@ -3432,7 +3414,22 @@ app.get('/api/admin/fin/teams', requireAdmin, async (req, res) => {
 app.get('/api/admin/fin/team-rankings', requireAdmin, async (req, res) => {
   try {
     const sortBy = String(req.query.sortBy || 'budget');
-    if (!['budget', 'balance', 'completed'].includes(sortBy)) {
+    // Core sort keys + budget-calculator line-item keys.
+    // The budget keys map to fields on the Budget document and let admins
+    // rank teams by any single cost category (e.g. highest head coach pay).
+    const BUDGET_SORT_FIELDS = {
+      tournaments:  'tournaments',
+      headPay:      'head_pay',
+      asstPay:      'asst_pay',
+      rentals:      'rentals',
+      gas:          'gas',
+      hotels:       'hotels',
+      uniforms:     'uniforms',
+      equipment:    'equipment',
+      insurance:    'insurance',
+      ambassadors:  'ambassadors',
+    };
+    if (!['budget', 'balance', 'completed'].includes(sortBy) && !BUDGET_SORT_FIELDS[sortBy]) {
       return res.status(400).json({ message: 'Invalid sortBy' });
     }
     const activeCoaches  = await Coach.find({ active: { $ne: false } }).select('_id first_name last_name team_name').lean();
@@ -3442,17 +3439,31 @@ app.get('/api/admin/fin/team-rankings', requireAdmin, async (req, res) => {
       Budget.aggregate([
         { $match: { coach_id: { $in: activeCoachIds } } },
         { $sort: { created_at: -1 } },
-        { $group: { _id: '$coach_id', total: { $first: '$total' } } },
+        { $group: {
+            _id:         '$coach_id',
+            total:       { $first: '$total' },
+            tournaments: { $first: '$tournaments' },
+            head_pay:    { $first: '$head_pay' },
+            asst_pay:    { $first: '$asst_pay' },
+            rentals:     { $first: '$rentals' },
+            gas:         { $first: '$gas' },
+            hotels:      { $first: '$hotels' },
+            uniforms:    { $first: '$uniforms' },
+            equipment:   { $first: '$equipment' },
+            insurance:   { $first: '$insurance' },
+            ambassadors: { $first: '$ambassadors' },
+        } },
       ]),
       PlayerPayment.aggregate([
         { $match: { coach_id: { $in: activeCoachIds }, status: { $in: ['Partial', 'Paid'] } } },
         { $group: { _id: '$coach_id', collected: { $sum: '$amount_paid' }, balance: { $sum: '$balance' } } },
       ]),
     ]);
-    const budgetByCoach  = Object.fromEntries(budgets .map(b => [String(b._id), b.total]));
+    const budgetByCoach  = Object.fromEntries(budgets .map(b => [String(b._id), b]));
     const paymentByCoach = Object.fromEntries(payments.map(p => [String(p._id), p]));
     let rows = activeCoaches.map(c => {
-      const budgetRaw    = budgetByCoach[String(c._id)] ?? 0;
+      const bdg          = budgetByCoach[String(c._id)] || {};
+      const budgetRaw    = bdg.total ?? 0;
       const p            = paymentByCoach[String(c._id)] || { collected: 0, balance: 0 };
       const collectedRaw = p.collected;
       const balanceRaw   = p.balance;
@@ -3466,7 +3477,19 @@ app.get('/api/admin/fin/team-rankings', requireAdmin, async (req, res) => {
         collected: finRound2(collectedRaw), 
         balance: finRound2(balanceRaw), 
         percentCollected, 
-        completed 
+        completed,
+        // Budget calculator line items — included so the UI can display the
+        // active sort metric alongside the existing stats.
+        tournaments: finRound2(bdg.tournaments ?? 0),
+        headPay:     finRound2(bdg.head_pay    ?? 0),
+        asstPay:     finRound2(bdg.asst_pay    ?? 0),
+        rentals:     finRound2(bdg.rentals     ?? 0),
+        gas:         finRound2(bdg.gas         ?? 0),
+        hotels:      finRound2(bdg.hotels      ?? 0),
+        uniforms:    finRound2(bdg.uniforms    ?? 0),
+        equipment:   finRound2(bdg.equipment   ?? 0),
+        insurance:   finRound2(bdg.insurance   ?? 0),
+        ambassadors: finRound2(bdg.ambassadors ?? 0),
       };
     });
     // Filter and sort based on sortBy parameter
@@ -3474,6 +3497,9 @@ app.get('/api/admin/fin/team-rankings', requireAdmin, async (req, res) => {
       rows.sort((a, b) => b.budget - a.budget || a.name.localeCompare(b.name));
     } else if (sortBy === 'balance') {
       rows.sort((a, b) => b.balance - a.balance || a.name.localeCompare(b.name));
+    } else if (BUDGET_SORT_FIELDS[sortBy]) {
+      // Budget line-item sort — highest value first, tie-break by name.
+      rows.sort((a, b) => b[sortBy] - a[sortBy] || a.name.localeCompare(b.name));
     } else {
       // For 'completed': sort all teams by % collected descending (highest % = top rank)
       rows.sort((a, b) => b.percentCollected - a.percentCollected || a.name.localeCompare(b.name));
@@ -3736,4 +3762,8 @@ app.get('/api/coach/fin/players', requireAuth, async (req, res) => {
 });
 
 // ── VERCEL SERVERLESS EXPORT ────────────────────────────────────────────────
-module.exports = app;
+// ── START SERVER ─────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`🚀  Server running on port ${PORT}`);
+});
