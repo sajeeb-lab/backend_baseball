@@ -3336,7 +3336,7 @@ app.get('/api/admin/fin/organization-overview', requireAdmin, async (req, res) =
     const activeCoachIds = activeCoaches.map(c => c._id);
     const activeTeams    = activeCoachIds.length;
     if (activeTeams === 0) {
-      return res.json({ activeTeams: 0, averagePlayerFee: 0, totalCollected: 0, outstanding: 0, payingPlayers: 0, totalPlayers: 0, organizationProfit: 0 });
+      return res.json({ activeTeams: 0, averagePlayerFee: 0, totalCollected: 0, outstanding: 0, payingPlayers: 0, totalPlayers: 0, organizationProfit: 0, totalBudget: 0, budgetedOrganizationProfit: 0 });
     }
     const [budgets, paymentAgg, playerStats] = await Promise.all([
       Budget.aggregate([
@@ -3365,10 +3365,18 @@ app.get('/api/admin/fin/organization-overview', requireAdmin, async (req, res) =
     // Calculate average player fee: for each team (Budget ÷ Paying Players from budget submission), then average across teams
     let totalPlayerFees = 0;
     let teamsWithValidFee = 0;
+    // totalBudget: sum of every active team's budget total.
+    // budgetedPlayers: sum of the "paying players" each coach entered in their
+    // budget calculator — used for the budget-based organization profit card.
+    let totalBudget = 0;
+    let budgetedPlayers = 0;
     
     budgets.forEach(budget => {
       const budgetTotal = budget.total ?? 0;
       const payingPlayers = budget.players ?? 0;
+      
+      totalBudget += budgetTotal;
+      budgetedPlayers += payingPlayers;
       
       if (budgetTotal > 0 && payingPlayers > 0) {
         totalPlayerFees += budgetTotal / payingPlayers;
@@ -3377,6 +3385,9 @@ app.get('/api/admin/fin/organization-overview', requireAdmin, async (req, res) =
     });
     
     const averagePlayerFee = teamsWithValidFee > 0 ? finRound2(totalPlayerFees / teamsWithValidFee) : 0;
+    // Budget-based organization profit: sum of budgeted paying players × $450.
+    // Distinct from organizationProfit, which uses actual registered players.
+    const budgetedOrganizationProfit = finRound2(budgetedPlayers * 450);
     
     const totalRegistered  = playerStats[0]?.total     ?? 0;
     const fullyPaid        = playerStats[0]?.fullyPaid ?? 0;
@@ -3390,6 +3401,8 @@ app.get('/api/admin/fin/organization-overview', requireAdmin, async (req, res) =
       notFullyPaid,
       totalRegistered,
       organizationProfit,
+      totalBudget:                 finRound2(totalBudget),
+      budgetedOrganizationProfit,
     });
   } catch (err) {
     console.error('fin org overview error:', err);
