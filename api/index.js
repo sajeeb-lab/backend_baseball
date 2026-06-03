@@ -3336,7 +3336,7 @@ app.get('/api/admin/fin/organization-overview', requireAdmin, async (req, res) =
     const activeCoachIds = activeCoaches.map(c => c._id);
     const activeTeams    = activeCoachIds.length;
     if (activeTeams === 0) {
-      return res.json({ activeTeams: 0, averagePlayerFee: 0, totalCollected: 0, outstanding: 0, payingPlayers: 0, totalPlayers: 0, organizationProfit: 0, totalBudget: 0, budgetedOrganizationProfit: 0 });
+      return res.json({ activeTeams: 0, averagePlayerFee: 0, totalCollected: 0, outstanding: 0, payingPlayers: 0, totalPlayers: 0, organizationProfit: 0, totalBudget: 0, budgetedOrganizationProfit: 0, budgetBalanceRemaining: 0 });
     }
     const [budgets, paymentAgg, playerStats] = await Promise.all([
       Budget.aggregate([
@@ -3393,16 +3393,21 @@ app.get('/api/admin/fin/organization-overview', requireAdmin, async (req, res) =
     const fullyPaid        = playerStats[0]?.fullyPaid ?? 0;
     const notFullyPaid     = totalRegistered - fullyPaid;
     const organizationProfit = finRound2(totalRegistered * 450);
+    const orgTotalCollected = finRound2(paymentAgg[0]?.collected ?? 0);
+    // Balance left to meet the combined budget of all active teams.
+    // Clamped at 0 so it never goes negative once collections exceed budget.
+    const budgetBalanceRemaining = finRound2(Math.max(totalBudget - orgTotalCollected, 0));
     res.json({
       activeTeams,
       averagePlayerFee,
-      totalCollected:     finRound2(paymentAgg[0]?.collected ?? 0),
+      totalCollected:     orgTotalCollected,
       outstanding:        finRound2(paymentAgg[0]?.outstanding ?? 0),
       notFullyPaid,
       totalRegistered,
       organizationProfit,
       totalBudget:                 finRound2(totalBudget),
       budgetedOrganizationProfit,
+      budgetBalanceRemaining,
     });
   } catch (err) {
     console.error('fin org overview error:', err);
@@ -3441,6 +3446,10 @@ app.get('/api/admin/fin/team-rankings', requireAdmin, async (req, res) => {
       equipment:    'equipment',
       insurance:    'insurance',
       ambassadors:  'ambassadors',
+      players:      'players',
+      seasons:      'seasons',
+      perPlayer:    'per_player',
+      others:       'others',
     };
     if (!['budget', 'balance', 'completed'].includes(sortBy) && !BUDGET_SORT_FIELDS[sortBy]) {
       return res.status(400).json({ message: 'Invalid sortBy' });
@@ -3465,6 +3474,10 @@ app.get('/api/admin/fin/team-rankings', requireAdmin, async (req, res) => {
             equipment:   { $first: '$equipment' },
             insurance:   { $first: '$insurance' },
             ambassadors: { $first: '$ambassadors' },
+            players:     { $first: '$players' },
+            seasons:     { $first: '$seasons' },
+            per_player:  { $first: '$per_player' },
+            others:      { $first: '$others' },
         } },
       ]),
       PlayerPayment.aggregate([
@@ -3503,6 +3516,10 @@ app.get('/api/admin/fin/team-rankings', requireAdmin, async (req, res) => {
         equipment:   finRound2(bdg.equipment   ?? 0),
         insurance:   finRound2(bdg.insurance   ?? 0),
         ambassadors: finRound2(bdg.ambassadors ?? 0),
+        players:     finRound2(bdg.players    ?? 0),
+        seasons:     finRound2(bdg.seasons    ?? 0),
+        perPlayer:   finRound2(bdg.per_player ?? 0),
+        others:      finRound2(Array.isArray(bdg.others) ? bdg.others.reduce((s, o) => s + (Number(o?.amt) || 0), 0) : 0),
       };
     });
     // Filter and sort based on sortBy parameter
