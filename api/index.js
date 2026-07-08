@@ -630,7 +630,14 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
             update.balance           = newBalance;
             update.status            = newBalance <= 0 ? 'Paid' : 'Partial';
           } else if (paymentType === 'full' || paymentType === 'remainder') {
-            update.amount_paid = existing.total_fee;
+            // If a coupon discounted this charge, record the ACTUAL dollars
+            // received (prior payments + this discounted charge) instead of
+            // assuming full fee — the account is still settled (balance 0,
+            // status Paid) because the coupon covers the difference.
+            const discountApplied = (session.total_details?.amount_discount || 0) > 0;
+            update.amount_paid = discountApplied
+              ? Math.min(existing.total_fee || 0, (existing.amount_paid || 0) + amountPaid)
+              : existing.total_fee;
             update.balance     = 0;
             update.status      = 'Paid';
             if (paymentType === 'deposit') {
@@ -2440,13 +2447,17 @@ app.get('/api/teams/:id/installment-preview', async (req, res) => {
   }
 });
 
+// ── COUPON CODES ──────────────────────────────────────────────
+// Coupon codes are created by the Stripe account owner in the Stripe
+// Dashboard (Products → Coupons → create coupon + promotion code) and are
+// account-level, so one code works across ALL coaches' products/prices.
+// Players enter the code directly on Stripe's hosted checkout page — every
+// session below is created with `allow_promotion_codes: true`.
+
 app.post('/api/checkout', async (req, res) => {
   if (!stripe) return res.status(500).json({ message: 'Stripe is not configured on the server' });
 
   try {
-    // pendingId — new pre-payment flow (no Player/PlayerPayment exists yet, materialized by webhook)
-    // playerPaymentId — legacy/coach-side flow (Player + PlayerPayment already exist, webhook updates them)
-    // Exactly one must be supplied.
     const { coachId, paymentType, playerPaymentId, pendingId, successUrl, cancelUrl } = req.body;
     if (!coachId || !paymentType) {
       return res.status(400).json({ message: 'coachId and paymentType are required' });
@@ -2619,6 +2630,10 @@ app.post('/api/checkout', async (req, res) => {
       line_items: lineItems,
       success_url: successUrl || `${req.headers.origin || 'https://yoursite.com'}?payment=success`,
       cancel_url:  cancelUrl  || `${req.headers.origin || 'https://yoursite.com'}?payment=cancelled`,
+      // Shows Stripe's built-in "Add promotion code" field on the hosted
+      // checkout page — coupons are created by the account owner in the
+      // Stripe Dashboard and apply across all coaches/products automatically.
+      allow_promotion_codes: true,
       metadata: {
         // One of these will be set; the webhook handles both cases.
         ...(playerPaymentId ? { playerPaymentId } : {}),
@@ -3189,6 +3204,8 @@ app.post('/api/teams/:id/tryout-registrations', async (req, res) => {
           line_items:  [{ price: tryout.stripe_price_id, quantity: 1 }],
           success_url: successUrl || `${req.headers.origin || ''}?tryout_payment=success`,
           cancel_url:  cancelUrl  || `${req.headers.origin || ''}?tryout_payment=cancelled`,
+          // Shows Stripe's built-in "Add promotion code" field on checkout.
+          allow_promotion_codes: true,
           metadata: {
             paymentType:    'tryout',
             registrationId: String(reg._id),
