@@ -1106,6 +1106,7 @@ const tryoutSchema = new mongoose.Schema({
   state:             { type: String, default: '' },
   stripe_product_id: { type: String, default: '' },
   stripe_price_id:   { type: String, default: '' },
+  archived:          { type: Boolean, default: false },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 tryoutSchema.index({ coach_id: 1 });
 
@@ -1635,6 +1636,7 @@ function normalizeTryout(t) {
     state:           t.state            || '',
     stripeProductId: t.stripe_product_id || '',
     stripePriceId:   t.stripe_price_id   || '',
+    archived:        !!t.archived,
   };
 }
 
@@ -2083,6 +2085,22 @@ app.put('/api/coach/tryouts/:tryoutId', requireAuth, async (req, res) => {
     res.json({ message: 'Tryout updated', tryout: normalizeTryout(tryout) });
   } catch (err) {
     res.status(500).json({ message: err.message || 'Server error' });
+  }
+});
+
+// ── ARCHIVE / UNARCHIVE TRYOUT ──
+app.patch('/api/coach/tryouts/:tryoutId/archive', requireAuth, async (req, res) => {
+  try {
+    const archived = req.body && req.body.archived === false ? false : true;
+    const tryout = await Tryout.findOneAndUpdate(
+      { _id: req.params.tryoutId, coach_id: req.coachId },
+      { archived },
+      { new: true }
+    );
+    if (!tryout) return res.status(404).json({ message: 'Tryout not found' });
+    res.json({ message: archived ? 'Tryout archived' : 'Tryout restored', tryout: normalizeTryout(tryout) });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error' });
   }
 });
 
@@ -2992,7 +3010,7 @@ app.get('/api/teams/:id', async (req, res) => {
 
 app.get('/api/teams/:id/tryouts', async (req, res) => {
   try {
-    const tryouts = await Tryout.find({ coach_id: req.params.id }).sort({ created_at: 1 });
+    const tryouts = await Tryout.find({ coach_id: req.params.id, archived: { $ne: true } }).sort({ created_at: 1 });
     res.json({ tryouts: tryouts.map(normalizeTryout) });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
